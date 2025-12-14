@@ -1,0 +1,26 @@
+name: Image cleanup
+
+# Controls when the action will run. Triggers the workflow on push or pull request
+# events but only for the main branch
+on:
+  schedule:
+    - cron: "0 06 * * 1"
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+  
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  cleanup:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+  
+    steps:
+
+    - uses: actions/delete-package-versions@v5
+      with: 
+       package-name: 'kfox'
+       package-type: 'container'
+       min-versions-to-keep: 3
+       ignore-versions: '^(0|[1-9]\\d*)\\.0\\.0$'
