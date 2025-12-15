@@ -276,7 +276,8 @@ async def transcribe_audio(audio_data: bytes, language: str = "da") -> dict:
                 "file": ("audio.wav", audio_data, "audio/wav")
             }
             data = {
-                "model": "large-v3",  # Will be ignored, server uses configured model
+                # Use full HuggingFace model path for speaches server
+                "model": "Systran/faster-whisper-large-v3",
                 "language": language,
                 "response_format": "verbose_json"
             }
