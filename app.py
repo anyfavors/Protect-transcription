@@ -16,9 +16,10 @@ import sqlite3
 import subprocess
 import tempfile
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
@@ -39,10 +40,13 @@ AUDIO_PATH = os.getenv("AUDIO_PATH", "/data/audio")
 # How many seconds before/after the event timestamp to capture
 AUDIO_BUFFER_BEFORE = int(os.getenv("AUDIO_BUFFER_BEFORE", "5"))
 AUDIO_BUFFER_AFTER = int(os.getenv("AUDIO_BUFFER_AFTER", "10"))
+# Timezone for datetime conversion (should match your Protect NVR timezone)
+LOCAL_TZ = ZoneInfo(os.getenv("TZ", "Europe/Copenhagen"))
 
 # Logging setup
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -91,7 +95,7 @@ def init_database():
 
 
 async def get_protect_client() -> ProtectApiClient:
-    """Get or create the Protect API client."""
+    """Get or create the Protect API client with reconnection support."""
     global protect_client
     
     if protect_client is None:
@@ -105,6 +109,26 @@ async def get_protect_client() -> ProtectApiClient:
         )
         await protect_client.update()
         logger.info("Connected to UniFi Protect")
+    else:
+        # Check if we need to refresh the connection
+        try:
+            # Try to access bootstrap to verify connection is alive
+            _ = protect_client.bootstrap.nvr.name
+        except Exception as e:
+            logger.warning(f"Protect client connection stale, reconnecting: {e}")
+            try:
+                await protect_client.close()
+            except Exception:
+                pass
+            protect_client = ProtectApiClient(
+                host=PROTECT_HOST,
+                port=PROTECT_PORT,
+                username=PROTECT_USERNAME,
+                password=PROTECT_PASSWORD,
+                verify_ssl=False
+            )
+            await protect_client.update()
+            logger.info("Reconnected to UniFi Protect")
     
     return protect_client
 
@@ -148,20 +172,49 @@ async def fetch_audio_clip(
             logger.info(f"Available cameras: {[(c.name, c.mac, c.id) for c in client.bootstrap.cameras.values()]}")
             return None
         
-        logger.info(f"Fetching clip from {camera.name} ({start_time} to {end_time})")
+        logger.info(f"Fetching clip from {camera.name} ({start_time.isoformat()} to {end_time.isoformat()})")
         
-        # Use the API's get_camera_video method to download video
-        # This returns the video as bytes
-        video_data = await client.get_camera_video(
-            camera.id,  # Use the actual camera UUID
-            start_time,
-            end_time,
-            channel=0  # Main channel (highest quality with audio)
-        )
+        # Try to export video using the Camera object
+        # Method signature varies by uiprotect version
+        video_data = None
+        
+        try:
+            # Try the most common method names
+            if hasattr(camera, 'get_video'):
+                logger.debug("Using camera.get_video()")
+                video_data = await camera.get_video(start_time, end_time)
+            elif hasattr(camera, 'export_video'):
+                logger.debug("Using camera.export_video()")
+                video_data = await camera.export_video(start_time, end_time)
+            else:
+                # List available methods for debugging
+                video_methods = [m for m in dir(camera) if 'video' in m.lower() or 'export' in m.lower()]
+                logger.error(f"No video export method found. Available video-related methods: {video_methods}")
+                logger.debug(f"All camera methods: {[m for m in dir(camera) if not m.startswith('_')]}")
+                return None
+                
+        except TypeError as e:
+            # Method might have different signature - try with output_file
+            logger.warning(f"Method call failed with TypeError: {e}, trying alternative signatures")
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                if hasattr(camera, 'get_video'):
+                    await camera.get_video(start_time, end_time, output_file=tmp_path)
+                    video_data = tmp_path.read_bytes()
+                    tmp_path.unlink(missing_ok=True)
+            except Exception as e2:
+                logger.error(f"Alternative method also failed: {e2}")
+                raise
+        except Exception as video_err:
+            logger.error(f"Error calling video export method: {video_err}")
+            raise
         
         if not video_data:
             logger.error("No video data received from Protect")
             return None
+        
+        logger.info(f"Received {len(video_data)} bytes of video data")
         
         # Extract audio using ffmpeg
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as video_file:
@@ -183,12 +236,22 @@ async def fetch_audio_clip(
             ], capture_output=True, text=True, timeout=60)
             
             if result.returncode != 0:
-                logger.error(f"ffmpeg error: {result.stderr}")
+                logger.error(f"ffmpeg error (exit code {result.returncode}): {result.stderr}")
+                # Check if it's a "no audio stream" error
+                if "does not contain any stream" in result.stderr or "Output file is empty" in result.stderr:
+                    logger.error("Video file contains no audio stream")
+                return None
+            
+            # Check if audio file was created and has content
+            audio_file_path = Path(audio_path)
+            if not audio_file_path.exists() or audio_file_path.stat().st_size == 0:
+                logger.error("ffmpeg produced empty or no audio file")
                 return None
             
             with open(audio_path, "rb") as f:
                 audio_data = f.read()
             
+            logger.info(f"Extracted {len(audio_data)} bytes of audio")
             return audio_data
             
         finally:
@@ -273,12 +336,14 @@ async def process_speech_event(
         
         camera_name = camera.name if camera else f"Unknown ({camera_id})"
         
-        # Calculate time range
-        event_time = datetime.fromtimestamp(timestamp_ms / 1000)
+        # Calculate time range with timezone awareness
+        # UniFi Protect timestamps are in milliseconds since epoch (UTC)
+        # Convert to timezone-aware datetime in local timezone
+        event_time = datetime.fromtimestamp(timestamp_ms / 1000, tz=LOCAL_TZ)
         start_time = event_time - timedelta(seconds=AUDIO_BUFFER_BEFORE)
         end_time = event_time + timedelta(seconds=AUDIO_BUFFER_AFTER)
         
-        logger.info(f"Processing speech event from {camera_name} at {event_time}")
+        logger.info(f"Processing speech event from {camera_name} at {event_time.isoformat()}")
         
         # Insert pending record
         cursor.execute("""
@@ -286,6 +351,13 @@ async def process_speech_event(
             VALUES (?, ?, ?, ?, 'processing')
         """, (event_id, camera_id, camera_name, event_time.isoformat()))
         conn.commit()
+        
+        # Wait for recording to complete
+        # We need to wait at least AUDIO_BUFFER_AFTER seconds after the event
+        # Plus a small buffer for the NVR to finish writing
+        wait_seconds = AUDIO_BUFFER_AFTER + 5
+        logger.info(f"Waiting {wait_seconds}s for recording to complete...")
+        await asyncio.sleep(wait_seconds)
         
         # Fetch audio
         audio_data = await fetch_audio_clip(camera_id, start_time, end_time)
