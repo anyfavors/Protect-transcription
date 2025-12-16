@@ -10,6 +10,7 @@ and provides a searchable web UI.
 import asyncio
 import hashlib
 import io
+import json
 import logging
 import os
 import sqlite3
@@ -70,6 +71,7 @@ def init_database():
             camera_name TEXT,
             timestamp DATETIME,
             transcription TEXT,
+            segments TEXT,
             language TEXT,
             confidence REAL,
             audio_file TEXT,
@@ -89,9 +91,80 @@ def init_database():
         CREATE INDEX IF NOT EXISTS idx_status ON transcriptions(status)
     """)
     
+    # Settings table for configurable parameters
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Initialize default settings if not present
+    default_settings = {
+        'whisper_model': 'Systran/faster-whisper-large-v3',
+        'language': 'da',
+        'buffer_before': '5',
+        'buffer_after': '60',  # 1 minute default, adjustable up to 10 min
+        'vad_filter': 'true',
+        'beam_size': '5'
+    }
+    
+    for key, value in default_settings.items():
+        cursor.execute("""
+            INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)
+        """, (key, value))
+    
+    # Migration: Add segments column if it doesn't exist
+    cursor.execute("PRAGMA table_info(transcriptions)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'segments' not in columns:
+        logger.info("Migrating database: adding segments column")
+        cursor.execute("ALTER TABLE transcriptions ADD COLUMN segments TEXT")
+    
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {DATABASE_PATH}")
+
+
+def get_settings() -> dict:
+    """Get all settings from database."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT key, value FROM settings")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    settings = {row[0]: row[1] for row in rows}
+    return settings
+
+
+def get_setting(key: str, default: str = None) -> str:
+    """Get a single setting from database."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    return row[0] if row else default
+
+
+def save_setting(key: str, value: str):
+    """Save a setting to database."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        INSERT OR REPLACE INTO settings (key, value, updated_at) 
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+    """, (key, value))
+    
+    conn.commit()
+    conn.close()
+    logger.info(f"Setting saved: {key} = {value}")
 
 
 async def get_protect_client() -> ProtectApiClient:
@@ -264,23 +337,34 @@ async def fetch_audio_clip(
         return None
 
 
-async def transcribe_audio(audio_data: bytes, language: str = "da") -> dict:
+async def transcribe_audio(audio_data: bytes) -> dict:
     """
     Send audio to Whisper server for transcription.
-    Uses the OpenAI-compatible API.
+    Uses the OpenAI-compatible API with settings from database.
     """
     try:
+        # Get settings from database
+        settings = get_settings()
+        model = settings.get('whisper_model', 'Systran/faster-whisper-large-v3')
+        language = settings.get('language', 'da')
+        vad_filter = settings.get('vad_filter', 'true').lower() == 'true'
+        
         async with httpx.AsyncClient(timeout=300.0) as client:
             # Prepare multipart form data
             files = {
                 "file": ("audio.wav", audio_data, "audio/wav")
             }
             data = {
-                # Use full HuggingFace model path for speaches server
-                "model": "Systran/faster-whisper-large-v3",
+                "model": model,
                 "language": language,
                 "response_format": "verbose_json"
             }
+            
+            # Add VAD filter if enabled (helps remove silence/noise)
+            if vad_filter:
+                data["vad_filter"] = "true"
+            
+            logger.info(f"Transcribing with model={model}, language={language}, vad={vad_filter}")
             
             response = await client.post(
                 f"{WHISPER_URL}/v1/audio/transcriptions",
@@ -322,6 +406,12 @@ async def process_speech_event(
             logger.info(f"Event {event_id} already processed, skipping")
             return
         
+        # Get settings from database
+        settings = get_settings()
+        buffer_before = int(settings.get('buffer_before', '5'))
+        buffer_after = int(settings.get('buffer_after', '10'))
+        language = settings.get('language', 'da')
+        
         # Get camera info - handle both UUID and MAC address
         client = await get_protect_client()
         camera = client.bootstrap.cameras.get(camera_id)
@@ -341,22 +431,23 @@ async def process_speech_event(
         # UniFi Protect timestamps are in milliseconds since epoch (UTC)
         # Convert to timezone-aware datetime in local timezone
         event_time = datetime.fromtimestamp(timestamp_ms / 1000, tz=LOCAL_TZ)
-        start_time = event_time - timedelta(seconds=AUDIO_BUFFER_BEFORE)
-        end_time = event_time + timedelta(seconds=AUDIO_BUFFER_AFTER)
+        start_time = event_time - timedelta(seconds=buffer_before)
+        end_time = event_time + timedelta(seconds=buffer_after)
         
         logger.info(f"Processing speech event from {camera_name} at {event_time.isoformat()}")
+        logger.info(f"Using buffer: {buffer_before}s before, {buffer_after}s after")
         
         # Insert pending record
         cursor.execute("""
-            INSERT INTO transcriptions (event_id, camera_id, camera_name, timestamp, status)
-            VALUES (?, ?, ?, ?, 'processing')
-        """, (event_id, camera_id, camera_name, event_time.isoformat()))
+            INSERT INTO transcriptions (event_id, camera_id, camera_name, timestamp, status, language)
+            VALUES (?, ?, ?, ?, 'processing', ?)
+        """, (event_id, camera_id, camera_name, event_time.isoformat(), language))
         conn.commit()
         
         # Wait for recording to complete
-        # We need to wait at least AUDIO_BUFFER_AFTER seconds after the event
+        # We need to wait at least buffer_after seconds after the event
         # Plus a small buffer for the NVR to finish writing
-        wait_seconds = AUDIO_BUFFER_AFTER + 5
+        wait_seconds = buffer_after + 5
         logger.info(f"Waiting {wait_seconds}s for recording to complete...")
         await asyncio.sleep(wait_seconds)
         
@@ -380,8 +471,8 @@ async def process_speech_event(
         with open(audio_filepath, "wb") as f:
             f.write(audio_data)
         
-        # Transcribe (Danish by default)
-        result = await transcribe_audio(audio_data, language="da")
+        # Transcribe using settings from database
+        result = await transcribe_audio(audio_data)
         
         if "error" in result:
             cursor.execute("""
@@ -393,10 +484,15 @@ async def process_speech_event(
             # Calculate duration from audio file
             duration = len(audio_data) / (16000 * 2)  # 16kHz, 16-bit
             
+            # Extract and store segments with timestamps
+            segments = result.get("segments", [])
+            segments_json = json.dumps(segments) if segments else None
+            
             cursor.execute("""
                 UPDATE transcriptions 
                 SET status = 'completed',
                     transcription = ?,
+                    segments = ?,
                     language = ?,
                     confidence = ?,
                     audio_file = ?,
@@ -404,6 +500,7 @@ async def process_speech_event(
                 WHERE event_id = ?
             """, (
                 result.get("text", ""),
+                segments_json,
                 result.get("language", "da"),
                 result.get("confidence", 0),
                 audio_filename,
@@ -598,20 +695,28 @@ async def get_transcriptions(
         
         rows = cursor.fetchall()
         
-        transcriptions = [
-            {
+        transcriptions = []
+        for row in rows:
+            segments = None
+            try:
+                raw_segments = row["segments"]
+                if raw_segments:
+                    segments = json.loads(raw_segments)
+            except (KeyError, json.JSONDecodeError):
+                segments = None
+            
+            transcriptions.append({
                 "id": row["id"],
                 "event_id": row["event_id"],
                 "camera_name": row["camera_name"],
                 "timestamp": row["timestamp"],
                 "transcription": row["transcription"],
+                "segments": segments,
                 "language": row["language"],
                 "duration_seconds": row["duration_seconds"],
                 "status": row["status"],
                 "audio_file": row["audio_file"]
-            }
-            for row in rows
-        ]
+            })
         
         return {
             "transcriptions": transcriptions,
@@ -705,6 +810,105 @@ async def get_stats():
         conn.close()
 
 
+# Available Whisper models for selection
+# Note: speaches uses faster-whisper which needs CTranslate2-format models
+AVAILABLE_MODELS = [
+    {"id": "Systran/faster-whisper-large-v3", "name": "Large V3 (Best accuracy)", "size": "~3GB"},
+    {"id": "deepdml/faster-whisper-large-v3-turbo-ct2", "name": "Large V3 Turbo (6x faster)", "size": "~1.6GB"},
+    {"id": "Systran/faster-whisper-medium", "name": "Medium (Balanced)", "size": "~1.5GB"},
+    {"id": "Systran/faster-whisper-small", "name": "Small (Fast)", "size": "~500MB"},
+]
+
+# Available languages
+AVAILABLE_LANGUAGES = [
+    {"code": "da", "name": "Danish"},
+    {"code": "en", "name": "English"},
+    {"code": "de", "name": "German"},
+    {"code": "sv", "name": "Swedish"},
+    {"code": "no", "name": "Norwegian"},
+    {"code": "auto", "name": "Auto-detect"},
+]
+
+
+@app.get("/api/settings")
+async def api_get_settings():
+    """Get all configurable settings."""
+    settings = get_settings()
+    return {
+        "settings": settings,
+        "available_models": AVAILABLE_MODELS,
+        "available_languages": AVAILABLE_LANGUAGES
+    }
+
+
+@app.put("/api/settings")
+async def api_update_settings(request: Request):
+    """Update settings."""
+    try:
+        data = await request.json()
+        
+        # Validate and save each setting
+        allowed_keys = ['whisper_model', 'language', 'buffer_before', 'buffer_after', 'vad_filter', 'beam_size']
+        
+        updated = []
+        for key, value in data.items():
+            if key in allowed_keys:
+                # Validate specific settings
+                if key in ['buffer_before', 'buffer_after', 'beam_size']:
+                    try:
+                        int_val = int(value)
+                        # buffer_before: 1-60s (lead-in context)
+                        # buffer_after: 1-600s (10 min for longer conversations)
+                        if key == 'buffer_before' and (int_val < 1 or int_val > 60):
+                            raise ValueError(f"buffer_before must be between 1 and 60 seconds")
+                        if key == 'buffer_after' and (int_val < 1 or int_val > 600):
+                            raise ValueError(f"buffer_after must be between 1 and 600 seconds (10 min)")
+                        if key == 'beam_size' and (int_val < 1 or int_val > 10):
+                            raise ValueError("beam_size must be between 1 and 10")
+                    except ValueError as e:
+                        raise HTTPException(status_code=400, detail=str(e))
+                
+                if key == 'vad_filter':
+                    value = 'true' if value in [True, 'true', '1', 1] else 'false'
+                
+                save_setting(key, str(value))
+                updated.append(key)
+        
+        return {"status": "updated", "updated_keys": updated, "settings": get_settings()}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error updating settings: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/settings/test-whisper")
+async def test_whisper_connection():
+    """Test connection to Whisper server and get available models."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{WHISPER_URL}/v1/models")
+            
+            if response.status_code == 200:
+                models = response.json()
+                return {
+                    "status": "connected",
+                    "whisper_url": WHISPER_URL,
+                    "models": models
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Whisper returned status {response.status_code}"
+                }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+
 @app.delete("/api/transcriptions/{transcription_id}")
 async def delete_transcription(transcription_id: int):
     """Delete a transcription and its audio file."""
@@ -723,9 +927,13 @@ async def delete_transcription(transcription_id: int):
         # Delete the audio file if it exists
         if row["audio_file"]:
             audio_path = Path(AUDIO_PATH) / row["audio_file"]
-            if audio_path.exists():
-                audio_path.unlink()
-                logger.info(f"Deleted audio file: {audio_path}")
+            try:
+                if audio_path.exists():
+                    audio_path.unlink()
+                    logger.info(f"Deleted audio file: {audio_path}")
+            except Exception as e:
+                logger.warning(f"Could not delete audio file {audio_path}: {e}")
+                # Continue with database deletion even if file deletion fails
         
         # Delete the database record
         cursor.execute("DELETE FROM transcriptions WHERE id = ?", (transcription_id,))
@@ -734,8 +942,85 @@ async def delete_transcription(transcription_id: int):
         logger.info(f"Deleted transcription {transcription_id}")
         return {"status": "deleted", "id": transcription_id}
         
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error deleting transcription {transcription_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
+
+
+@app.get("/api/transcriptions/{transcription_id}/srt")
+async def download_srt(transcription_id: int):
+    """Download transcription as SRT subtitle file."""
+    from fastapi.responses import PlainTextResponse
+    
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("SELECT * FROM transcriptions WHERE id = ?", (transcription_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Transcription not found")
+        
+        segments = []
+        if row["segments"]:
+            try:
+                segments = json.loads(row["segments"])
+            except json.JSONDecodeError:
+                pass
+        
+        if not segments:
+            # Fall back to single segment with full text
+            segments = [{
+                "start": 0,
+                "end": row["duration_seconds"] or 10,
+                "text": row["transcription"] or ""
+            }]
+        
+        # Generate SRT format
+        srt_lines = []
+        for i, seg in enumerate(segments, 1):
+            start = seg.get("start", 0)
+            end = seg.get("end", start + 5)
+            text = seg.get("text", "").strip()
+            
+            if text:
+                start_srt = format_srt_time(start)
+                end_srt = format_srt_time(end)
+                srt_lines.append(f"{i}")
+                srt_lines.append(f"{start_srt} --> {end_srt}")
+                srt_lines.append(text)
+                srt_lines.append("")
+        
+        srt_content = "\n".join(srt_lines)
+        
+        # Create filename from camera and timestamp
+        camera = row["camera_name"] or "unknown"
+        timestamp = row["timestamp"] or "unknown"
+        filename = f"{camera}_{timestamp}.srt".replace(" ", "_").replace(":", "-")
+        
+        return PlainTextResponse(
+            content=srt_content,
+            media_type="text/plain",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+        
+    finally:
+        conn.close()
+
+
+def format_srt_time(seconds: float) -> str:
+    """Format seconds as SRT timestamp (HH:MM:SS,mmm)."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
 @app.post("/api/transcriptions/{transcription_id}/retry")
