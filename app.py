@@ -101,13 +101,15 @@ def init_database():
     """)
     
     # Initialize default settings if not present
+    # Use env vars as defaults for backwards compatibility
     default_settings = {
         'whisper_model': 'Systran/faster-whisper-large-v3',
         'language': 'da',
         'buffer_before': '5',
         'buffer_after': '60',  # 1 minute default, adjustable up to 10 min
         'vad_filter': 'true',
-        'beam_size': '5'
+        'beam_size': '5',
+        'protect_host': os.getenv("PROTECT_HOST", ""),  # NVR address
     }
     
     for key, value in default_settings.items():
@@ -167,14 +169,32 @@ def save_setting(key: str, value: str):
     logger.info(f"Setting saved: {key} = {value}")
 
 
-async def get_protect_client() -> ProtectApiClient:
+def get_protect_host() -> str:
+    """Get Protect host from settings, fall back to env var."""
+    host = get_setting('protect_host', '')
+    if not host:
+        host = PROTECT_HOST
+    return host
+
+
+async def get_protect_client(force_reconnect: bool = False) -> ProtectApiClient:
     """Get or create the Protect API client with reconnection support."""
     global protect_client
     
-    if protect_client is None:
-        logger.info(f"Connecting to UniFi Protect at {PROTECT_HOST}")
+    host = get_protect_host()
+    if not host:
+        raise ValueError("Protect host not configured. Set it in Settings.")
+    
+    if protect_client is None or force_reconnect:
+        if protect_client is not None:
+            try:
+                await protect_client.close()
+            except Exception:
+                pass
+        
+        logger.info(f"Connecting to UniFi Protect at {host}")
         protect_client = ProtectApiClient(
-            host=PROTECT_HOST,
+            host=host,
             port=PROTECT_PORT,
             username=PROTECT_USERNAME,
             password=PROTECT_PASSWORD,
@@ -194,7 +214,7 @@ async def get_protect_client() -> ProtectApiClient:
             except Exception:
                 pass
             protect_client = ProtectApiClient(
-                host=PROTECT_HOST,
+                host=host,
                 port=PROTECT_PORT,
                 username=PROTECT_USERNAME,
                 password=PROTECT_PASSWORD,
@@ -388,13 +408,20 @@ async def transcribe_audio(audio_data: bytes) -> dict:
 async def process_speech_event(
     event_id: str,
     camera_id: str,
-    timestamp_ms: int
+    timestamp_ms: int,
+    skip_wait: bool = False
 ):
     """
     Process a speech detection event:
     1. Fetch audio from NVR
     2. Transcribe with Whisper
     3. Store in database
+    
+    Args:
+        event_id: Unique event identifier
+        camera_id: Camera UUID or MAC address
+        timestamp_ms: Event timestamp in milliseconds since epoch
+        skip_wait: If True, skip waiting for recording (for retries/sync)
     """
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
@@ -444,12 +471,15 @@ async def process_speech_event(
         """, (event_id, camera_id, camera_name, event_time.isoformat(), language))
         conn.commit()
         
-        # Wait for recording to complete
-        # We need to wait at least buffer_after seconds after the event
-        # Plus a small buffer for the NVR to finish writing
-        wait_seconds = buffer_after + 5
-        logger.info(f"Waiting {wait_seconds}s for recording to complete...")
-        await asyncio.sleep(wait_seconds)
+        # Wait for recording to complete (only for real-time events, not retries)
+        if not skip_wait:
+            # We need to wait at least buffer_after seconds after the event
+            # Plus a small buffer for the NVR to finish writing
+            wait_seconds = buffer_after + 5
+            logger.info(f"Waiting {wait_seconds}s for recording to complete...")
+            await asyncio.sleep(wait_seconds)
+        else:
+            logger.info("Skipping wait (retry/sync mode)")
         
         # Fetch audio
         audio_data = await fetch_audio_clip(camera_id, start_time, end_time)
@@ -844,13 +874,17 @@ async def api_get_settings():
 @app.put("/api/settings")
 async def api_update_settings(request: Request):
     """Update settings."""
+    global protect_client
+    
     try:
         data = await request.json()
         
         # Validate and save each setting
-        allowed_keys = ['whisper_model', 'language', 'buffer_before', 'buffer_after', 'vad_filter', 'beam_size']
+        allowed_keys = ['whisper_model', 'language', 'buffer_before', 'buffer_after', 'vad_filter', 'beam_size', 'protect_host']
         
         updated = []
+        protect_host_changed = False
+        
         for key, value in data.items():
             if key in allowed_keys:
                 # Validate specific settings
@@ -871,8 +905,22 @@ async def api_update_settings(request: Request):
                 if key == 'vad_filter':
                     value = 'true' if value in [True, 'true', '1', 1] else 'false'
                 
+                if key == 'protect_host':
+                    # Clean up the host - remove trailing slashes, protocol if present
+                    value = str(value).strip().rstrip('/')
+                    if value.startswith('https://'):
+                        value = value[8:]
+                    if value.startswith('http://'):
+                        value = value[7:]
+                    protect_host_changed = True
+                
                 save_setting(key, str(value))
                 updated.append(key)
+        
+        # If protect_host changed, invalidate the client so it reconnects with new host
+        if protect_host_changed:
+            protect_client = None
+            logger.info("Protect host changed, client will reconnect on next request")
         
         return {"status": "updated", "updated_keys": updated, "settings": get_settings()}
         
@@ -907,6 +955,166 @@ async def test_whisper_connection():
             "status": "error",
             "message": str(e)
         }
+
+
+@app.post("/api/settings/test-protect")
+async def test_protect_connection():
+    """Test connection to UniFi Protect NVR."""
+    try:
+        host = get_protect_host()
+        if not host:
+            return {
+                "status": "error",
+                "message": "Protect host not configured"
+            }
+        
+        client = await get_protect_client(force_reconnect=True)
+        nvr = client.bootstrap.nvr
+        cameras = list(client.bootstrap.cameras.values())
+        
+        return {
+            "status": "connected",
+            "host": host,
+            "nvr_name": nvr.name,
+            "nvr_version": nvr.version,
+            "camera_count": len(cameras),
+            "cameras": [{"id": c.id, "name": c.name} for c in cameras]
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+
+@app.post("/api/sync")
+async def sync_speech_events(
+    background_tasks: BackgroundTasks,
+    hours: int = Query(default=24, ge=1, le=168)  # 1 hour to 7 days
+):
+    """
+    Sync speech events from UniFi Protect NVR.
+    Fetches recent speech detection events and queues any missing ones for transcription.
+    """
+    try:
+        host = get_protect_host()
+        if not host:
+            raise HTTPException(status_code=400, detail="Protect host not configured. Set it in Settings.")
+        
+        client = await get_protect_client()
+        
+        # Calculate time range
+        end_time = datetime.now(tz=LOCAL_TZ)
+        start_time = end_time - timedelta(hours=hours)
+        
+        logger.info(f"Syncing speech events from {start_time.isoformat()} to {end_time.isoformat()}")
+        
+        # Get existing event IDs to avoid duplicates
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT event_id FROM transcriptions")
+        existing_events = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        
+        events_found = 0
+        events_queued = 0
+        events_skipped = 0
+        errors = []
+        
+        # Try to get events using the get_events method
+        try:
+            # The uiprotect library's get_events method
+            events = await client.get_events(
+                start=start_time,
+                end=end_time,
+            )
+            
+            for event in events:
+                events_found += 1
+                
+                # Check if this is a speech/smart detect event
+                smart_detect_types = getattr(event, 'smart_detect_types', None)
+                if smart_detect_types is None:
+                    continue
+                
+                # Convert to list of strings for comparison
+                smart_types_str = [str(t).lower() for t in smart_detect_types]
+                
+                # Only process speech events
+                if 'speech' not in smart_types_str and 'speechdetect' not in smart_types_str:
+                    continue
+                
+                event_id = str(event.id)
+                
+                if event_id in existing_events:
+                    events_skipped += 1
+                    continue
+                
+                # Get camera info
+                camera_id = getattr(event, 'camera_id', None)
+                if not camera_id:
+                    camera = getattr(event, 'camera', None)
+                    if camera:
+                        camera_id = camera.id
+                
+                if not camera_id:
+                    logger.warning(f"Event {event_id} has no camera_id, skipping")
+                    continue
+                
+                # Get timestamp from event
+                event_time = getattr(event, 'start', None)
+                if not event_time:
+                    logger.warning(f"Event {event_id} has no start time, skipping")
+                    continue
+                
+                timestamp_ms = int(event_time.timestamp() * 1000)
+                
+                camera = client.bootstrap.cameras.get(camera_id)
+                camera_name = camera.name if camera else f"Unknown ({camera_id})"
+                
+                logger.info(f"Queuing missing event {event_id} from {camera_name} at {event_time}")
+                
+                # Queue for processing with skip_wait=True since recording exists
+                background_tasks.add_task(
+                    process_speech_event,
+                    event_id,
+                    str(camera_id),
+                    timestamp_ms,
+                    True  # skip_wait
+                )
+                
+                existing_events.add(event_id)  # Track to avoid duplicate queuing
+                events_queued += 1
+                
+        except AttributeError as e:
+            error_msg = f"API method not available: {e}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+        except Exception as e:
+            error_msg = f"Error fetching events: {e}"
+            logger.exception(error_msg)
+            errors.append(error_msg)
+        
+        result = {
+            "status": "completed",
+            "hours_searched": hours,
+            "events_found": events_found,
+            "events_queued": events_queued,
+            "events_skipped": events_skipped,
+            "message": f"Queued {events_queued} new events for transcription"
+        }
+        
+        if errors:
+            result["errors"] = errors
+            result["status"] = "completed_with_errors"
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error syncing events: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/transcriptions/{transcription_id}")
@@ -1066,12 +1274,13 @@ async def retry_transcription(
         
         logger.info(f"Retrying transcription {transcription_id} (event {event_id})")
         
-        # Queue the re-processing (skip the wait since this is a retry)
+        # Queue the re-processing with skip_wait=True since recording already exists
         background_tasks.add_task(
             process_speech_event,
             event_id,
             camera_id,
-            timestamp_ms
+            timestamp_ms,
+            True  # skip_wait
         )
         
         return {
