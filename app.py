@@ -1021,6 +1021,8 @@ async def sync_speech_events(
         events_skipped = 0
         errors = []
         speech_events_found = 0
+        all_smart_types = set()
+        all_event_types = set()
         
         # Try to get events using the get_events method
         try:
@@ -1030,34 +1032,34 @@ async def sync_speech_events(
                 end=end_time,
             )
             
-            # Debug: log first few events to understand structure
-            for i, event in enumerate(events):
-                if i < 5:
-                    smart_types = getattr(event, 'smart_detect_types', None)
-                    event_type = getattr(event, 'type', None)
-                    logger.info(f"DEBUG Event {i}: type={event_type}, smart_detect_types={smart_types}, repr={repr(smart_types)}")
             
             for event in events:
                 events_found += 1
+                
+                event_type = getattr(event, 'type', None)
+                if event_type:
+                    all_event_types.add(str(event_type))
                 
                 # Check if this is a speech/smart detect event
                 smart_detect_types = getattr(event, 'smart_detect_types', None)
                 if smart_detect_types is None:
                     continue
                 
-                # Convert to list of strings for comparison - handle enums
+                # Collect all types and convert to list of strings for comparison
                 smart_types_str = []
                 for t in smart_detect_types:
                     # Handle both enum values and strings
                     if hasattr(t, 'value'):
-                        smart_types_str.append(str(t.value).lower())
+                        type_str = str(t.value).lower()
                     elif hasattr(t, 'name'):
-                        smart_types_str.append(str(t.name).lower())
+                        type_str = str(t.name).lower()
                     else:
-                        smart_types_str.append(str(t).lower())
+                        type_str = str(t).lower()
+                    smart_types_str.append(type_str)
+                    all_smart_types.add(type_str)
                 
-                # Only process speech events
-                is_speech = any(s in ['speech', 'speechdetect', 'audio'] for s in smart_types_str)
+                # Only process speech events - try multiple possible names
+                is_speech = any(s in ['speech', 'speechdetect', 'audio', 'talk', 'voice'] for s in smart_types_str)
                 if not is_speech:
                     continue
                 
@@ -1114,6 +1116,11 @@ async def sync_speech_events(
             logger.exception(error_msg)
             errors.append(error_msg)
         
+        # Log all unique types found for debugging
+        logger.info(f"DEBUG All event types found: {all_event_types}")
+        logger.info(f"DEBUG All smart detect types found: {all_smart_types}")
+        logger.info(f"DEBUG Speech events found: {speech_events_found}")
+        
         result = {
             "status": "completed",
             "hours_searched": hours,
@@ -1121,7 +1128,9 @@ async def sync_speech_events(
             "speech_events_found": speech_events_found,
             "events_queued": events_queued,
             "events_skipped": events_skipped,
-            "message": f"Queued {events_queued} new events for transcription"
+            "message": f"Queued {events_queued} new events for transcription",
+            "debug_smart_types": list(all_smart_types),  # Include in response for easy viewing
+            "debug_event_types": list(all_event_types)
         }
         
         if errors:
