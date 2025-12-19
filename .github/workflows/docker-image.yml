@@ -6,7 +6,7 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
-# VIGTIGT: Tilladelser til Release, Packages og Security scanning
+# IMPORTANT: Permissions required for releases, packages, and security scanning
 permissions:
   contents: write
   packages: write
@@ -22,7 +22,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # --- CACHE TRIN 1: Trivy DB ---
+      # --- CACHE: Trivy DB ---
       - name: Cache Trivy DB
         uses: actions/cache@v4
         with:
@@ -31,7 +31,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-trivy-
 
-      # TRIN 1: Scan kode (Bruger cache)
+      # STEP 1: Scan Source Code (Filesystem) - Fail Fast
       - name: Run Trivy vulnerability scanner (Filesystem)
         uses: aquasecurity/trivy-action@master
         with:
@@ -41,7 +41,7 @@ jobs:
           exit-code: '1'
           cache-dir: .trivy
 
-      # TRIN 2: Beregn version og lav Git Tag
+      # STEP 2: Calculate Semantic Version
       - name: Calculate Semantic Version
         id: semantic_version
         uses: PaulHatch/semantic-version@v5.4.0
@@ -76,7 +76,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ steps.semantic_version.outputs.version }}
             type=sha,format=long
 
-      # --- CACHE TRIN 2: Docker Layers (type=gha) ---
+      # STEP 3: Build and Push (Using GitHub Cache)
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -85,11 +85,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Dette gemmer build-lagene direkte i GitHub Actions cache
+          # Use GitHub Actions cache backend for Docker layers
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # TRIN 3: Opret GitHub Release ( Changelog )
+      # STEP 4: Create GitHub Release
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
@@ -101,7 +101,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # TRIN 4: Scan det færdige image (Bruger cache)
+      # STEP 5: Scan the Final Image (Optional/Recommended)
       - name: Run Trivy vulnerability scanner (Image)
         uses: aquasecurity/trivy-action@master
         with:
