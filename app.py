@@ -19,7 +19,6 @@ import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -55,14 +54,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global Protect API client
-protect_client: Optional[ProtectApiClient] = None
+protect_client: ProtectApiClient | None = None
+_protect_client_lock = asyncio.Lock()
 
 
 def init_database():
     """Initialize SQLite database with required tables and FTS5 for full-text search."""
     Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
-    
-    conn = sqlite3.connect(DATABASE_PATH)
+
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
     cursor = conn.cursor()
     
     cursor.execute("""
@@ -189,41 +189,39 @@ def init_database():
 
 def get_settings() -> dict:
     """Get all settings from database."""
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT key, value FROM settings")
-    rows = cursor.fetchall()
-    conn.close()
-    
-    settings = {row[0]: row[1] for row in rows}
-    return settings
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM settings")
+        return {row[0]: row[1] for row in cursor.fetchall()}
+    finally:
+        conn.close()
 
 
-def get_setting(key: str, default: str = None) -> str:
+def get_setting(key: str, default: str | None = None) -> str | None:
     """Get a single setting from database."""
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    return row[0] if row else default
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        return row[0] if row else default
+    finally:
+        conn.close()
 
 
 def save_setting(key: str, value: str):
     """Save a setting to database."""
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        INSERT OR REPLACE INTO settings (key, value, updated_at) 
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-    """, (key, value))
-    
-    conn.commit()
-    conn.close()
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        """, (key, value))
+        conn.commit()
+    finally:
+        conn.close()
     logger.info(f"Setting saved: {key} = {value}")
 
 
@@ -238,39 +236,20 @@ def get_protect_host() -> str:
 async def get_protect_client(force_reconnect: bool = False) -> ProtectApiClient:
     """Get or create the Protect API client with reconnection support."""
     global protect_client
-    
+
     host = get_protect_host()
     if not host:
         raise ValueError("Protect host not configured. Set it in Settings.")
-    
-    if protect_client is None or force_reconnect:
-        if protect_client is not None:
-            try:
-                await protect_client.close()
-            except Exception:
-                pass
-        
-        logger.info(f"Connecting to UniFi Protect at {host}")
-        protect_client = ProtectApiClient(
-            host=host,
-            port=PROTECT_PORT,
-            username=PROTECT_USERNAME,
-            password=PROTECT_PASSWORD,
-            verify_ssl=False  # Local network, self-signed cert
-        )
-        await protect_client.update()
-        logger.info("Connected to UniFi Protect")
-    else:
-        # Check if we need to refresh the connection
-        try:
-            # Try to access bootstrap to verify connection is alive
-            _ = protect_client.bootstrap.nvr.name
-        except Exception as e:
-            logger.warning(f"Protect client connection stale, reconnecting: {e}")
-            try:
-                await protect_client.close()
-            except Exception:
-                pass
+
+    async with _protect_client_lock:
+        if protect_client is None or force_reconnect:
+            if protect_client is not None:
+                try:
+                    await protect_client.close()
+                except Exception:
+                    pass
+
+            logger.info(f"Connecting to UniFi Protect at {host}")
             protect_client = ProtectApiClient(
                 host=host,
                 port=PROTECT_PORT,
@@ -279,16 +258,34 @@ async def get_protect_client(force_reconnect: bool = False) -> ProtectApiClient:
                 verify_ssl=False
             )
             await protect_client.update()
-            logger.info("Reconnected to UniFi Protect")
-    
-    return protect_client
+            logger.info("Connected to UniFi Protect")
+        else:
+            try:
+                _ = protect_client.bootstrap.nvr.name
+            except Exception as e:
+                logger.warning(f"Protect client connection stale, reconnecting: {e}")
+                try:
+                    await protect_client.close()
+                except Exception:
+                    pass
+                protect_client = ProtectApiClient(
+                    host=host,
+                    port=PROTECT_PORT,
+                    username=PROTECT_USERNAME,
+                    password=PROTECT_PASSWORD,
+                    verify_ssl=False
+                )
+                await protect_client.update()
+                logger.info("Reconnected to UniFi Protect")
+
+        return protect_client
 
 
 async def fetch_audio_clip(
     camera_id: str,
     start_time: datetime,
     end_time: datetime
-) -> Optional[bytes]:
+) -> bytes | None:
     """
     Fetch audio clip from UniFi Protect NVR.
     
@@ -524,12 +521,6 @@ async def process_pending_transcription(row: dict) -> None:
     cursor = conn.cursor()
     
     try:
-        # Mark as processing
-        cursor.execute("""
-            UPDATE transcriptions SET status = 'processing' WHERE id = ?
-        """, (record_id,))
-        conn.commit()
-        
         # Get settings from database
         settings = get_settings()
         buffer_before = int(settings.get('buffer_before', '5'))
@@ -633,33 +624,41 @@ async def transcription_worker():
     
     while True:
         try:
-            # Fetch one pending record
+            # Fetch one pending record and immediately mark it as processing
+            # (both in the same transaction so no other request can steal it)
             conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT id, event_id, camera_id, camera_name, timestamp, language
-                FROM transcriptions
-                WHERE status = 'pending'
-                ORDER BY timestamp ASC
-                LIMIT 1
-            """)
-            row = cursor.fetchone()
-            conn.close()
-            
+            try:
+                cursor.execute("""
+                    SELECT id, event_id, camera_id, camera_name, timestamp, language
+                    FROM transcriptions
+                    WHERE status = 'pending'
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                """)
+                row = cursor.fetchone()
+                if row:
+                    cursor.execute(
+                        "UPDATE transcriptions SET status = 'processing' WHERE id = ? AND status = 'pending'",
+                        (row["id"],)
+                    )
+                    conn.commit()
+                    if cursor.rowcount == 0:
+                        # Another request already claimed it; skip this iteration
+                        row = None
+            finally:
+                conn.close()
+
             if row:
-                # Process this transcription
                 await process_pending_transcription(dict(row))
-                # Small delay between processing to avoid overwhelming the system
                 await asyncio.sleep(1)
             else:
-                # No pending work, wait before polling again
                 await asyncio.sleep(5)
-                
+
         except Exception as e:
             logger.exception(f"Error in transcription worker: {e}")
-            await asyncio.sleep(10)  # Wait longer on error
+            await asyncio.sleep(10)
 
 
 # Keep legacy function for compatibility with retry endpoint
@@ -707,10 +706,10 @@ class TranscriptionResponse(BaseModel):
     camera_name: str
     timestamp: str
     transcription: str
-    language: Optional[str]
-    duration_seconds: Optional[float]
+    language: str | None
+    duration_seconds: float | None
     status: str
-    audio_file: Optional[str]
+    audio_file: str | None
 
 
 # FastAPI app
@@ -752,7 +751,7 @@ app = FastAPI(
 )
 
 # Templates
-templates = Jinja2Templates(directory="/app/templates")
+templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
 @app.get("/health")
@@ -840,10 +839,10 @@ async def receive_webhook(request: Request):
 async def get_transcriptions(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
-    camera: Optional[str] = None,
-    date: Optional[str] = None,
-    search: Optional[str] = None,
-    status: Optional[str] = None
+    camera: str | None = None,
+    date: str | None = None,
+    search: str | None = None,
+    status: str | None = None
 ):
     """
     Get transcriptions with filtering and pagination.
@@ -1768,31 +1767,36 @@ async def retry_all_errors():
         settings = get_settings()
         language = settings.get('language', 'da')
 
-        queued = 0
+        # Parse all rows first so a bad timestamp doesn't leave us half-deleted
+        to_retry = []
         for row in rows:
-            event_id = row["event_id"]
-            camera_id = row["camera_id"]
-            camera_name = row["camera_name"]
-            timestamp_str = row["timestamp"]
-
             try:
-                dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(str(row["timestamp"]).replace('Z', '+00:00'))
                 timestamp_ms = int(dt.timestamp() * 1000)
             except Exception as e:
-                logger.error(f"Failed to parse timestamp {timestamp_str} for event {event_id}: {e}")
+                logger.error(f"Failed to parse timestamp for event {row['event_id']}: {e}")
                 continue
+            to_retry.append((dict(row), timestamp_ms))
 
+        if not to_retry:
+            conn.close()
+            return {"queued": 0, "message": "All error records had unparseable timestamps"}
+
+        # Delete audio files, remove DB rows, then queue
+        for row, timestamp_ms in to_retry:
             if row["audio_file"]:
                 old_audio_path = Path(AUDIO_PATH) / row["audio_file"]
                 if old_audio_path.exists():
-                    old_audio_path.unlink()
-
+                    old_audio_path.unlink(missing_ok=True)
             cursor.execute("DELETE FROM transcriptions WHERE id = ?", (row["id"],))
-            queue_transcription(event_id, camera_id, camera_name, timestamp_ms, language)
-            queued += 1
 
         conn.commit()
         conn.close()
+
+        queued = 0
+        for row, timestamp_ms in to_retry:
+            if queue_transcription(row["event_id"], row["camera_id"], row["camera_name"], timestamp_ms, language):
+                queued += 1
 
         logger.info(f"Queued {queued} error transcriptions for retry")
         return {"queued": queued, "message": f"Queued {queued} transcriptions for retry"}
@@ -1821,7 +1825,7 @@ async def get_audio(filename: str):
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Serve the main web UI."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 
 # Manual test endpoint (for development)
