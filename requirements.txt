@@ -12,7 +12,7 @@ jinja2>=3.1.2
 httpx>=0.26.0
 
 # UniFi Protect API
-uiprotect>=7.0.0
+uiprotect>=10.2.3
 
 # Pydantic for data validation
 pydantic>=2.5.0

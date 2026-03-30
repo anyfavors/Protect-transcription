@@ -36,6 +36,8 @@ PROTECT_PORT = int(os.getenv("PROTECT_PORT", "443"))
 PROTECT_USERNAME = os.getenv("PROTECT_USERNAME", "")
 PROTECT_PASSWORD = os.getenv("PROTECT_PASSWORD", "")
 WHISPER_URL = os.getenv("WHISPER_URL", "http://whisper-server:8000")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/transcriptions.db")
 AUDIO_PATH = os.getenv("AUDIO_PATH", "/data/audio")
 # How many seconds before/after the event timestamp to capture
@@ -144,6 +146,8 @@ def init_database():
         'vad_filter': 'true',
         'beam_size': '5',
         'protect_host': os.getenv("PROTECT_HOST", ""),  # NVR address
+        'ollama_url': os.getenv("OLLAMA_URL", "http://ollama:11434"),
+        'ollama_model': os.getenv("OLLAMA_MODEL", "llama3.2"),
     }
     
     for key, value in default_settings.items():
@@ -151,6 +155,20 @@ def init_database():
             INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)
         """, (key, value))
     
+    # Summaries table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_type TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            period_label TEXT,
+            summary TEXT,
+            transcription_count INTEGER DEFAULT 0,
+            generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(period_type, period_key)
+        )
+    """)
+
     # Migration: Add segments column if it doesn't exist
     cursor.execute("PRAGMA table_info(transcriptions)")
     columns = [col[1] for col in cursor.fetchall()]
@@ -1068,7 +1086,7 @@ async def api_update_settings(request: Request):
         data = await request.json()
         
         # Validate and save each setting
-        allowed_keys = ['whisper_model', 'language', 'buffer_before', 'buffer_after', 'vad_filter', 'beam_size', 'protect_host']
+        allowed_keys = ['whisper_model', 'language', 'buffer_before', 'buffer_after', 'vad_filter', 'beam_size', 'protect_host', 'ollama_url', 'ollama_model']
         
         updated = []
         protect_host_changed = False
@@ -1562,6 +1580,226 @@ async def retry_transcription(transcription_id: int):
     except Exception as e:
         conn.close()
         logger.exception(f"Error retrying transcription: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/summaries")
+async def get_summaries(period: str = Query("daily")):
+    """Return stored summaries for the requested period type, plus periods that have transcriptions."""
+    if period not in ("daily", "weekly", "monthly"):
+        raise HTTPException(status_code=400, detail="period must be daily, weekly, or monthly")
+
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Build the period key expression depending on period type
+    if period == "daily":
+        period_expr = "strftime('%Y-%m-%d', timestamp)"
+    elif period == "weekly":
+        # ISO week: year + week number
+        period_expr = "strftime('%Y-W%W', timestamp)"
+    else:
+        period_expr = "strftime('%Y-%m', timestamp)"
+
+    # All periods that have completed transcriptions
+    cursor.execute(f"""
+        SELECT {period_expr} AS period_key, COUNT(*) AS cnt
+        FROM transcriptions
+        WHERE status = 'completed' AND transcription IS NOT NULL AND transcription != ''
+        GROUP BY period_key
+        ORDER BY period_key DESC
+        LIMIT 60
+    """)
+    periods = [{"period_key": row["period_key"], "count": row["cnt"]} for row in cursor.fetchall()]
+
+    # Existing summaries
+    cursor.execute(
+        "SELECT period_key, summary, transcription_count, generated_at FROM summaries WHERE period_type = ? ORDER BY period_key DESC",
+        (period,)
+    )
+    summaries_map = {row["period_key"]: dict(row) for row in cursor.fetchall()}
+    conn.close()
+
+    result = []
+    for p in periods:
+        key = p["period_key"]
+        s = summaries_map.get(key)
+        result.append({
+            "period_key": key,
+            "count": p["count"],
+            "summary": s["summary"] if s else None,
+            "generated_at": s["generated_at"] if s else None,
+            "stale": s is not None and s["transcription_count"] != p["count"],
+        })
+
+    return {"period": period, "items": result}
+
+
+@app.post("/api/summaries/generate")
+async def generate_summary(request: Request):
+    """Generate (or regenerate) an AI summary for a given period."""
+    data = await request.json()
+    period = data.get("period_type", "daily")
+    period_key = data.get("period_key", "")
+
+    if period not in ("daily", "weekly", "monthly"):
+        raise HTTPException(status_code=400, detail="period_type must be daily, weekly, or monthly")
+    if not period_key:
+        raise HTTPException(status_code=400, detail="period_key is required")
+
+    settings = get_settings()
+    ollama_url = settings.get("ollama_url", OLLAMA_URL).rstrip("/")
+    ollama_model = settings.get("ollama_model", OLLAMA_MODEL)
+
+    # Build date filter
+    if period == "daily":
+        date_filter = "strftime('%Y-%m-%d', timestamp) = ?"
+    elif period == "weekly":
+        date_filter = "strftime('%Y-W%W', timestamp) = ?"
+    else:
+        date_filter = "strftime('%Y-%m', timestamp) = ?"
+
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute(f"""
+        SELECT camera_name, timestamp, transcription
+        FROM transcriptions
+        WHERE status = 'completed' AND transcription IS NOT NULL AND transcription != ''
+          AND {date_filter}
+        ORDER BY timestamp ASC
+    """, (period_key,))
+    rows = cursor.fetchall()
+
+    if not rows:
+        conn.close()
+        raise HTTPException(status_code=404, detail="No transcriptions found for this period")
+
+    # Format transcriptions for the prompt
+    lines = []
+    for row in rows:
+        try:
+            dt = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+            ts = dt.astimezone(LOCAL_TZ).strftime("%H:%M")
+        except Exception:
+            ts = str(row["timestamp"])
+        lines.append(f"[{ts}] {row['camera_name']}: {row['transcription']}")
+
+    transcript_block = "\n".join(lines)
+    count = len(rows)
+
+    if period == "daily":
+        period_label = period_key
+    elif period == "weekly":
+        period_label = f"week {period_key}"
+    else:
+        period_label = period_key
+
+    system_prompt = (
+        "You are a helpful home assistant summarising audio transcriptions captured by security cameras. "
+        "The transcriptions may be in Danish, English, or a mix. "
+        "Write your summary in the same language as the majority of the transcriptions. "
+        "Be concise. Group related events. Note who spoke (by camera location) and any notable topics or visitors."
+    )
+    user_prompt = (
+        f"Here are the transcriptions captured during {period_label}:\n\n"
+        f"{transcript_block}\n\n"
+        f"Please write a clear, concise summary of what happened, organised by theme or time of day."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{ollama_url}/v1/chat/completions",
+                json={
+                    "model": ollama_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "stream": False,
+                }
+            )
+            if response.status_code != 200:
+                conn.close()
+                raise HTTPException(status_code=502, detail=f"Ollama error {response.status_code}: {response.text[:300]}")
+            summary_text = response.json()["choices"][0]["message"]["content"].strip()
+    except HTTPException:
+        conn.close()
+        raise
+    except Exception as e:
+        conn.close()
+        logger.exception(f"Error calling Ollama: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to reach Ollama: {e}")
+
+    cursor.execute("""
+        INSERT INTO summaries (period_type, period_key, period_label, summary, transcription_count, generated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(period_type, period_key) DO UPDATE SET
+            summary = excluded.summary,
+            transcription_count = excluded.transcription_count,
+            period_label = excluded.period_label,
+            generated_at = CURRENT_TIMESTAMP
+    """, (period, period_key, period_label, summary_text, count))
+    conn.commit()
+    conn.close()
+
+    logger.info(f"Generated {period} summary for {period_key} ({count} transcriptions)")
+    return {"period_type": period, "period_key": period_key, "summary": summary_text, "transcription_count": count}
+
+
+@app.post("/api/transcriptions/retry-errors")
+async def retry_all_errors():
+    """Retry all transcriptions in error state."""
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("SELECT * FROM transcriptions WHERE status = 'error'")
+        rows = cursor.fetchall()
+
+        if not rows:
+            conn.close()
+            return {"queued": 0, "message": "No error transcriptions found"}
+
+        settings = get_settings()
+        language = settings.get('language', 'da')
+
+        queued = 0
+        for row in rows:
+            event_id = row["event_id"]
+            camera_id = row["camera_id"]
+            camera_name = row["camera_name"]
+            timestamp_str = row["timestamp"]
+
+            try:
+                dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                timestamp_ms = int(dt.timestamp() * 1000)
+            except Exception as e:
+                logger.error(f"Failed to parse timestamp {timestamp_str} for event {event_id}: {e}")
+                continue
+
+            if row["audio_file"]:
+                old_audio_path = Path(AUDIO_PATH) / row["audio_file"]
+                if old_audio_path.exists():
+                    old_audio_path.unlink()
+
+            cursor.execute("DELETE FROM transcriptions WHERE id = ?", (row["id"],))
+            queue_transcription(event_id, camera_id, camera_name, timestamp_ms, language)
+            queued += 1
+
+        conn.commit()
+        conn.close()
+
+        logger.info(f"Queued {queued} error transcriptions for retry")
+        return {"queued": queued, "message": f"Queued {queued} transcriptions for retry"}
+
+    except Exception as e:
+        conn.close()
+        logger.exception(f"Error retrying all errors: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
