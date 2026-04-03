@@ -146,7 +146,7 @@ pytest --cov=app --cov-report=term-missing
 
 # Compile Tailwind CSS (requires tailwindcss v4 standalone CLI on PATH)
 # Download from: https://github.com/tailwindlabs/tailwindcss/releases/latest
-tailwindcss -i static/app.css.src -o static/app.css --minify
+tailwindcss -i app.css.src -o static/app.css --minify
 
 # Build Docker image
 docker build -t protect-transcribe .
