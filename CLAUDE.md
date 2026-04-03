@@ -85,7 +85,7 @@ tests/
 Models are discovered from the speaches registry (`GET /v1/registry?task=automatic-speech-recognition`) and downloaded on demand (`POST /v1/models/{model_id:path}`). The `/api/settings/speaches-models` endpoint merges registry + installed model lists. The UI shows which models are installed vs available to download.
 
 ### Tailwind CSS
-CSS is compiled by the **Tailwind standalone CLI** during the Docker build (not loaded from CDN at runtime). The compiled file is `static/app.css`. Dark mode uses the `class` strategy — the `<html>` element gets/loses the `dark` class, persisted to `localStorage`.
+CSS is compiled by the **Tailwind v4 standalone CLI** during the Docker build (not loaded from CDN at runtime). The compiled file is `static/app.css`. Configuration lives entirely in `static/app.css.src` — no `tailwind.config.js` (that's v3). Dark mode uses `@custom-variant dark (&:where(.dark, .dark *))` so `dark:` utilities activate when `.dark` is on any ancestor, persisted to `localStorage`.
 
 ### asyncio.Lock for Protect client
 `get_protect_client()` is called from the worker and from routes concurrently. The lock in `protect.py` ensures only one coroutine initialises the singleton at a time.
@@ -144,7 +144,8 @@ mypy app/
 # Tests with coverage
 pytest --cov=app --cov-report=term-missing
 
-# Compile Tailwind CSS (requires tailwindcss binary on PATH)
+# Compile Tailwind CSS (requires tailwindcss v4 standalone CLI on PATH)
+# Download from: https://github.com/tailwindlabs/tailwindcss/releases/latest
 tailwindcss -i static/app.css.src -o static/app.css --minify
 
 # Build Docker image

@@ -1,7 +1,13 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
+/* Class-based dark mode: applies when .dark is on any ancestor */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Tell Tailwind where to scan for utility classes */
+@source "../templates";
+@source "../static";
+
+/* Custom styles */
 [x-cloak] { display: none !important; }
 
 .audio-player { max-width: 100%; height: 32px; }

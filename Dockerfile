@@ -23,8 +23,7 @@ COPY requirements.txt .
 # Install Python packages using uv
 RUN uv pip install --system --no-cache -r requirements.txt
 
-# Download Tailwind standalone CLI and compile CSS
-COPY tailwind.config.js .
+# Download Tailwind v4 standalone CLI and compile CSS
 COPY static/ static/
 COPY templates/ templates/
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -37,8 +36,8 @@ RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-${TW_ARCH}" \
          -o /usr/local/bin/tailwindcss && \
     chmod +x /usr/local/bin/tailwindcss && \
-    tailwindcss -c tailwind.config.js -i static/app.css.src -o static/app.css --minify && \
-    rm /usr/local/bin/tailwindcss tailwind.config.js
+    tailwindcss -i static/app.css.src -o static/app.css --minify && \
+    rm /usr/local/bin/tailwindcss
 
 # Copy application source
 COPY app/ app/
