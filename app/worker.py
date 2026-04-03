@@ -7,8 +7,9 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from app.config import DATABASE_PATH, LOCAL_TZ
+from app.config import AUDIO_PATH, DATABASE_PATH, LOCAL_TZ
 from app.database import get_settings
 from app.transcription import fetch_audio_clip, save_audio_file, transcribe_audio
 
@@ -92,17 +93,30 @@ async def process_pending_transcription(row: dict) -> None:
             buffer_after,
         )
 
-        audio_data = await fetch_audio_clip(camera_id, start_time, end_time)
+        # Reuse cached audio file if it exists (e.g. retranscribe-all flow).
+        # Only fetch from the NVR when no cached file is available.
+        existing_audio_file: str | None = row.get("audio_file")
+        cached_path = Path(AUDIO_PATH) / existing_audio_file if existing_audio_file else None
 
-        if not audio_data:
-            cursor.execute(
-                "UPDATE transcriptions SET status='error', transcription='Failed to fetch audio' WHERE id=?",
-                (record_id,),
-            )
-            conn.commit()
-            return
-
-        audio_filename = save_audio_file(audio_data, event_time, camera_name)
+        if cached_path and cached_path.exists():
+            logger.info("Reusing cached audio file: %s", cached_path.name)
+            audio_data = cached_path.read_bytes()
+            audio_filename = existing_audio_file
+        else:
+            if existing_audio_file:
+                logger.warning(
+                    "Cached audio file missing (%s), re-fetching from NVR", existing_audio_file
+                )
+            fetched = await fetch_audio_clip(camera_id, start_time, end_time)
+            if not fetched:
+                cursor.execute(
+                    "UPDATE transcriptions SET status='error', transcription='Failed to fetch audio' WHERE id=?",
+                    (record_id,),
+                )
+                conn.commit()
+                return
+            audio_data = fetched
+            audio_filename = save_audio_file(audio_data, event_time, camera_name)
         result = await transcribe_audio(audio_data)
 
         if "error" in result:
@@ -173,7 +187,7 @@ async def transcription_worker() -> None:
 
             try:
                 cursor.execute("""
-                    SELECT id, event_id, camera_id, camera_name, timestamp, language
+                    SELECT id, event_id, camera_id, camera_name, timestamp, language, audio_file
                     FROM transcriptions
                     WHERE status = 'pending'
                     ORDER BY timestamp ASC
