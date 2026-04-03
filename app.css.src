@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /* Class-based dark mode: override built-in dark variant to use .dark class on ancestor */
-@variant dark (&:where(.dark, .dark *));
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* Tell Tailwind where to scan for utility classes */
 @source "./templates/**/*.html";
