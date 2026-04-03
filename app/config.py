@@ -52,7 +52,7 @@ AVAILABLE_MODELS: list[dict] = [
     {"id": "Systran/faster-whisper-large-v3", "name": "Whisper Large V3", "size": "~3GB"},
     {
         "id": "deepdml/faster-whisper-large-v3-turbo-ct2",
-        "name": "Whisper Large V3 Turbo (6× faster)",
+        "name": "Whisper Large V3 Turbo (6x faster)",
         "size": "~1.6GB",
     },
     {"id": "Systran/faster-whisper-medium", "name": "Whisper Medium", "size": "~1.5GB"},

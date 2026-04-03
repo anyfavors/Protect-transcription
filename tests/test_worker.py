@@ -1,13 +1,13 @@
 """Tests for the transcription queue helper (queue_transcription)."""
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.worker import queue_transcription
 
 
 def _now_ms() -> int:
-    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    return int(datetime.now(tz=UTC).timestamp() * 1000)
 
 
 def test_queue_transcription_inserts_pending(tmp_db):

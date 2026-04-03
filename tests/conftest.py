@@ -10,7 +10,6 @@ import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import asynccontextmanager
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -47,8 +46,8 @@ def tmp_db(tmp_path, monkeypatch) -> Generator[str, None, None]:
     monkeypatch.setattr(db_mod, "_connect", _make_connection)
 
     # Patch get_connection in every module that imported it at module load time
-    import app.routes.transcriptions as _rt
     import app.routes.sync as _rs
+    import app.routes.transcriptions as _rt
     import app.summaries as _sm
     import app.worker as _wk
 

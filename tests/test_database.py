@@ -2,8 +2,6 @@
 
 import sqlite3
 
-import pytest
-
 from app.database import get_setting, get_settings, init_database, save_setting
 
 

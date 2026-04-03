@@ -1,6 +1,5 @@
 """Unit tests for pure transcription logic (no network, no DB)."""
 
-import pytest
 
 from app.transcription import _is_hallucination
 

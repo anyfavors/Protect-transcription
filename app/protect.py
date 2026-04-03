@@ -3,6 +3,7 @@ UniFi Protect API client management.
 Provides a lazily-initialised, thread-safe singleton client with auto-reconnect.
 """
 
+import contextlib
 import logging
 
 from uiprotect import ProtectApiClient
@@ -13,14 +14,7 @@ from app.database import get_setting
 logger = logging.getLogger(__name__)
 
 _protect_client: ProtectApiClient | None = None
-
-try:
-    import asyncio
-    _protect_client_lock = asyncio.Lock()
-except RuntimeError:
-    # During import before an event loop exists (e.g. test collection) this is fine;
-    # the lock is created lazily on first use inside an async context.
-    _protect_client_lock = None  # type: ignore[assignment]
+_protect_client_lock = None
 
 
 def _get_lock():
@@ -30,6 +24,12 @@ def _get_lock():
     if _protect_client_lock is None:
         _protect_client_lock = asyncio.Lock()
     return _protect_client_lock
+
+
+async def _close_client(client: ProtectApiClient) -> None:
+    """Best-effort shutdown of a Protect client (stubs don't expose .close())."""
+    with contextlib.suppress(Exception):
+        await client.close()  # type: ignore[attr-defined]
 
 
 def get_protect_host() -> str:
@@ -51,10 +51,7 @@ async def get_protect_client(force_reconnect: bool = False) -> ProtectApiClient:
     async with _get_lock():
         if _protect_client is None or force_reconnect:
             if _protect_client is not None:
-                try:
-                    await _protect_client.close()
-                except Exception:
-                    pass
+                await _close_client(_protect_client)
 
             logger.info("Connecting to UniFi Protect at %s", host)
             _protect_client = ProtectApiClient(
@@ -71,10 +68,7 @@ async def get_protect_client(force_reconnect: bool = False) -> ProtectApiClient:
                 _ = _protect_client.bootstrap.nvr.name
             except Exception as exc:
                 logger.warning("Protect client stale, reconnecting: %s", exc)
-                try:
-                    await _protect_client.close()
-                except Exception:
-                    pass
+                await _close_client(_protect_client)
                 _protect_client = ProtectApiClient(
                     host=host,
                     port=PROTECT_PORT,
@@ -92,7 +86,7 @@ async def close_protect_client() -> None:
     """Close the singleton client on shutdown."""
     global _protect_client
     if _protect_client:
-        await _protect_client.close()
+        await _close_client(_protect_client)
         _protect_client = None
 
 

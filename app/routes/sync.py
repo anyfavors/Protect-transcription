@@ -99,7 +99,7 @@ async def sync_speech_events(
             timestamp_ms = int(event_time.timestamp() * 1000)
 
             camera = client.bootstrap.cameras.get(camera_id)
-            camera_name = camera.name if camera else f"Unknown ({camera_id})"
+            camera_name: str = (camera.name or f"Unknown ({camera_id})") if camera else f"Unknown ({camera_id})"
 
             if queue_transcription(event_id, str(camera_id), camera_name, timestamp_ms, language):
                 events_queued += 1

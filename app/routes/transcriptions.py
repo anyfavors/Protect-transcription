@@ -2,6 +2,7 @@
 Transcription CRUD routes: list, delete, retry, SRT download, bulk operations.
 """
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -11,7 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 
-from app.config import AUDIO_PATH, LOCAL_TZ
+from app.config import AUDIO_PATH
 from app.database import get_connection, get_settings
 from app.worker import queue_transcription
 
@@ -59,7 +60,7 @@ async def get_transcriptions(
                 f"SELECT COUNT(*) FROM transcriptions t "
                 f"INNER JOIN transcriptions_fts fts ON t.id = fts.rowid "
                 f"WHERE transcriptions_fts MATCH ?{extra}",
-                [f'"{search_term}"'] + params,
+                [f'"{search_term}"', *params],
             )
             total = cursor.fetchone()[0]
 
@@ -69,7 +70,7 @@ async def get_transcriptions(
                 f"INNER JOIN transcriptions_fts fts ON t.id = fts.rowid "
                 f"WHERE transcriptions_fts MATCH ?{extra} "
                 f"ORDER BY t.timestamp DESC LIMIT ? OFFSET ?",
-                [f'"{search_term}"'] + params + [per_page, offset],
+                [f'"{search_term}"', *params, per_page, offset],
             )
         else:
             where_clauses, params = [], []
@@ -91,7 +92,7 @@ async def get_transcriptions(
             cursor.execute(
                 f"SELECT * FROM transcriptions WHERE {where_sql} "
                 f"ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-                params + [per_page, offset],
+                [*params, per_page, offset],
             )
 
         rows = cursor.fetchall()
@@ -228,10 +229,8 @@ async def download_srt(transcription_id: int):
 
         segments = []
         if row["segments"]:
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 segments = json.loads(row["segments"])
-            except json.JSONDecodeError:
-                pass
 
         if not segments:
             segments = [{"start": 0, "end": row["duration_seconds"] or 10, "text": row["transcription"] or ""}]
@@ -298,10 +297,8 @@ async def retry_transcription(transcription_id: int):
         logger.exception("Error retrying transcription %d: %s", transcription_id, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        try:
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
 
 
 @router.post("/api/transcriptions/retry-errors")
@@ -344,10 +341,8 @@ async def retry_all_errors():
         logger.exception("Error retrying all errors: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        try:
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
 
 
 @router.post("/api/transcriptions/retranscribe-all")

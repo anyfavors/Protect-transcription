@@ -34,7 +34,7 @@ def get_summaries(period: str) -> dict:
     expr = _period_expr(period)
 
     conn = get_connection()
-    
+
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -81,7 +81,7 @@ async def generate_summary(period: str, period_key: str) -> dict:
     date_filter = f"{_PERIOD_EXPR[period]} = ?"
 
     conn = get_connection()
-    
+
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 

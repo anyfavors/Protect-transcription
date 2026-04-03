@@ -4,9 +4,7 @@ All tests use the in-memory database fixture — no real NVR or Whisper needed.
 """
 
 import sqlite3
-from datetime import datetime, timezone
-
-import pytest
+from datetime import UTC, datetime
 
 
 def _insert_transcription(db_path: str, **kwargs) -> int:
@@ -15,7 +13,7 @@ def _insert_transcription(db_path: str, **kwargs) -> int:
         "event_id": "evt_001",
         "camera_id": "cam_abc",
         "camera_name": "Front Door",
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "timestamp": datetime.now(tz=UTC).isoformat(),
         "transcription": "Hej verden",
         "status": "completed",
         "language": "da",

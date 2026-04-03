@@ -3,6 +3,7 @@ SQLite database helpers: schema init, settings CRUD, and connection management.
 All connections use WAL mode and a 30-second timeout to avoid lock contention.
 """
 
+import contextlib
 import logging
 import sqlite3
 from pathlib import Path
@@ -135,10 +136,8 @@ def init_database() -> None:
         cur.execute("ALTER TABLE transcriptions ADD COLUMN segments TEXT")
 
     # Rebuild FTS index to cover existing rows (idempotent)
-    try:
+    with contextlib.suppress(sqlite3.OperationalError):
         cur.execute("INSERT INTO transcriptions_fts(transcriptions_fts) VALUES('rebuild')")
-    except sqlite3.OperationalError:
-        pass
 
     conn.commit()
     conn.close()
