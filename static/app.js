@@ -52,6 +52,8 @@ function transcribeApp() {
             vad_filter: 'true',
             beam_size: '5',
             protect_host: '',
+            ollama_url: '',
+            ollama_model: '',
             condition_on_previous_text: 'false',
             no_speech_threshold: '0.6',
             compression_ratio_threshold: '2.4',

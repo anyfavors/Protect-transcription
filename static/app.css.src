@@ -1,11 +1,11 @@
 @import "tailwindcss";
 
-/* Class-based dark mode: applies when .dark is on any ancestor */
-@custom-variant dark (&:where(.dark, .dark *));
+/* Class-based dark mode: override built-in dark variant to use .dark class on ancestor */
+@variant dark (&:where(.dark, .dark *));
 
-/* Tell Tailwind where to scan for utility classes */
-@source "../templates";
-@source "../static";
+/* Tell Tailwind where to scan for utility classes (paths relative to CWD = /app in Docker) */
+@source "templates";
+@source "static";
 
 /* Custom styles */
 [x-cloak] { display: none !important; }

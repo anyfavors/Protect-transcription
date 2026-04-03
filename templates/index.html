@@ -11,7 +11,7 @@
         }
     </script>
     <link rel="stylesheet" href="/static/app.css">
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <script src="https://unpkg.com/alpinejs@3.14.9/dist/cdn.min.js" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 </head>
 <body class="bg-gray-100 dark:bg-gray-950 min-h-screen transition-colors duration-200 text-gray-900 dark:text-gray-100">
@@ -538,6 +538,15 @@
                                         <option :value="lang.code" x-text="lang.name"></option>
                                     </template>
                                 </select>
+                            </div>
+                            <!-- Beam size -->
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                                    <i class="fas fa-sliders-h mr-1"></i> Beam size <span class="font-normal text-gray-400">(1–10)</span>
+                                </label>
+                                <input type="number" x-model="settings.beam_size" min="1" max="10"
+                                    class="w-24 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 outline-none">
+                                <p class="text-xs text-gray-400 mt-0.5">Higher = more accurate, slower. 5 is the default.</p>
                             </div>
                             <!-- Buffers -->
                             <div class="grid grid-cols-2 gap-3">
