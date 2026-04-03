@@ -32,33 +32,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
-# Available Whisper models for selection in the UI.
-# speaches uses faster-whisper which requires CTranslate2-format models.
-AVAILABLE_MODELS: list[dict] = [
-    # Danish-optimised (recommended)
-    {
-        "id": "syvai/faster-hviske-v3-conversation",
-        "name": "Hviske V3 Danish (best Danish, CTranslate2)",
-        "size": "~3GB",
-        "danish": True,
-    },
-    {
-        "id": "CoRal-project/roest-v3-whisper-1.5b",
-        "name": "Røst V3 Danish — Alexandra Inst. (57% better CER)",
-        "size": "~3GB",
-        "danish": True,
-    },
-    # Generic Whisper
-    {"id": "Systran/faster-whisper-large-v3", "name": "Whisper Large V3", "size": "~3GB"},
-    {
-        "id": "deepdml/faster-whisper-large-v3-turbo-ct2",
-        "name": "Whisper Large V3 Turbo (6x faster)",
-        "size": "~1.6GB",
-    },
-    {"id": "Systran/faster-whisper-medium", "name": "Whisper Medium", "size": "~1.5GB"},
-    {"id": "Systran/faster-whisper-small", "name": "Whisper Small (fastest)", "size": "~500MB"},
-]
-
 AVAILABLE_LANGUAGES: list[dict] = [
     {"code": "da", "name": "Danish"},
     {"code": "en", "name": "English"},

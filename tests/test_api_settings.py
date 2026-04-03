@@ -6,7 +6,6 @@ def test_get_settings_returns_defaults(client):
     assert r.status_code == 200
     data = r.json()
     assert "settings" in data
-    assert "available_models" in data
     assert "available_languages" in data
     assert data["settings"]["language"] == "da"
 

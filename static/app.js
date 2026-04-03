@@ -15,6 +15,11 @@ function transcribeApp() {
         settingsSaved: false,
         whisperStatus: null,
         protectStatus: null,
+        // Speaches model management
+        speachesModels: [],
+        speachesModelsLoading: false,
+        speachesModelsError: null,
+        downloadConfirm: { show: false, model: null },
         // Sync modal
         showSyncModal: false,
         syncLoading: false,
@@ -51,7 +56,6 @@ function transcribeApp() {
             no_speech_threshold: '0.6',
             compression_ratio_threshold: '2.4',
         },
-        availableModels: [],
         availableLanguages: [],
 
         async init() {
@@ -307,9 +311,54 @@ function transcribeApp() {
             try {
                 const data = await (await fetch('/api/settings')).json();
                 this.settings = data.settings;
-                this.availableModels = data.available_models;
                 this.availableLanguages = data.available_languages;
             } catch (e) { console.error(e); }
+        },
+
+        openSettings() {
+            this.showSettings = true;
+            if (this.speachesModels.length === 0) this.loadSpeachesModels();
+        },
+
+        async loadSpeachesModels() {
+            this.speachesModelsLoading = true;
+            this.speachesModelsError = null;
+            try {
+                const data = await (await fetch('/api/settings/speaches-models')).json();
+                this.speachesModels = data.models;
+            } catch (e) {
+                this.speachesModelsError = 'Could not reach speaches server';
+            } finally {
+                this.speachesModelsLoading = false;
+            }
+        },
+
+        confirmDownloadModel(model) {
+            this.downloadConfirm = { show: true, model };
+        },
+
+        async downloadModel() {
+            const model = this.downloadConfirm.model;
+            if (!model) return;
+            this.downloadConfirm = { show: false, model: null };
+
+            const m = this.speachesModels.find(x => x.id === model.id);
+            if (m) m.downloading = true;
+            try {
+                const r = await fetch(`/api/settings/speaches-models/${model.id}`, { method: 'POST' });
+                if (r.ok) {
+                    if (m) { m.installed = true; m.downloading = false; }
+                    this.settings.whisper_model = model.id;
+                    this.showToast(`Model downloaded: ${model.id}`, 'success');
+                } else {
+                    const err = await r.json();
+                    this.showToast(`Download failed: ${err.detail || r.status}`, 'error');
+                    if (m) m.downloading = false;
+                }
+            } catch (e) {
+                this.showToast(`Download failed: ${e.message}`, 'error');
+                if (m) m.downloading = false;
+            }
         },
 
         async saveSettings() {

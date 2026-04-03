@@ -23,10 +23,25 @@ COPY requirements.txt .
 # Install Python packages using uv
 RUN uv pip install --system --no-cache -r requirements.txt
 
+# Download Tailwind standalone CLI and compile CSS
+COPY tailwind.config.js .
+COPY static/ static/
+COPY templates/ templates/
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+      amd64) TW_ARCH="linux-x64" ;; \
+      arm64) TW_ARCH="linux-arm64" ;; \
+      arm*)  TW_ARCH="linux-armv7" ;; \
+      *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-${TW_ARCH}" \
+         -o /usr/local/bin/tailwindcss && \
+    chmod +x /usr/local/bin/tailwindcss && \
+    tailwindcss -c tailwind.config.js -i static/app.css.src -o static/app.css --minify && \
+    rm /usr/local/bin/tailwindcss tailwind.config.js
+
 # Copy application source
 COPY app/ app/
-COPY templates/ templates/
-COPY static/ static/
 
 # Create data directories
 RUN mkdir -p /data/audio && chmod 777 /data/audio

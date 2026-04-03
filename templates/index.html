@@ -10,31 +10,13 @@
             document.documentElement.classList.remove('dark');
         }
     </script>
-    <script>tailwind.config = { darkMode: 'class' }</script>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/app.css">
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <style>
-        [x-cloak] { display: none !important; }
-        .audio-player { max-width: 100%; height: 32px; }
-        mark { background-color: #fef08a; padding: 0 2px; border-radius: 2px; }
-        .dark mark { background-color: #854d0e; color: #fef9c3; }
-        [id^="segments-"] { max-height: 280px; overflow-y: auto; scroll-behavior: smooth; }
-        @keyframes segment-pulse {
-            0%, 100% { background-color: rgb(219 234 254); }
-            50%       { background-color: rgb(191 219 254); }
-        }
-        @keyframes segment-pulse-dark {
-            0%, 100% { background-color: rgb(30 58 138 / 0.4); }
-            50%       { background-color: rgb(30 64 175 / 0.6); }
-        }
-        .segment-active      { animation: segment-pulse 2s ease-in-out infinite; }
-        .dark .segment-active { animation: segment-pulse-dark 2s ease-in-out infinite; }
-    </style>
 </head>
 <body class="bg-gray-100 dark:bg-gray-950 min-h-screen transition-colors duration-200 text-gray-900 dark:text-gray-100">
 
-<div x-data="transcribeApp()" x-init="init()" class="max-w-5xl mx-auto px-4 py-6">
+<div x-data="transcribeApp()" x-init="init()" class="max-w-screen-2xl mx-auto px-6 py-6">
 
     <!-- ═══════════════════════════ HEADER ═══════════════════════════ -->
     <header class="flex items-center justify-between mb-6">
@@ -56,7 +38,7 @@
                 class="w-9 h-9 rounded-lg flex items-center justify-center text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 transition">
                 <i class="fas fa-chart-bar"></i>
             </button>
-            <button @click="showSettings = true" title="Settings"
+            <button @click="openSettings()" title="Settings"
                 class="w-9 h-9 rounded-lg flex items-center justify-center text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 transition">
                 <i class="fas fa-cog"></i>
             </button>
@@ -399,7 +381,7 @@
         @keydown.escape.window="showSettings = false">
         <div class="flex items-center justify-center min-h-screen px-4 py-8">
             <div class="fixed inset-0 bg-black/60" @click="showSettings = false"></div>
-            <div class="relative bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 w-full max-w-2xl max-h-[90vh] flex flex-col">
+            <div class="relative bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 w-full max-w-3xl max-h-[90vh] flex flex-col">
                 <!-- Header -->
                 <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
                     <h2 class="font-semibold text-gray-900 dark:text-gray-100"><i class="fas fa-cog mr-2 text-gray-400"></i>Settings</h2>
@@ -426,20 +408,124 @@
                     <!-- ── Transcription tab ── -->
                     <template x-if="settingsTab === 'transcription'">
                         <div class="space-y-5">
-                            <!-- Model -->
+                            <!-- Model picker -->
                             <div>
-                                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                                    <i class="fas fa-brain mr-1 text-gray-400"></i> Whisper Model
-                                </label>
-                                <select x-model="settings.whisper_model"
-                                    class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 outline-none">
-                                    <template x-for="model in availableModels" :key="model.id">
-                                        <option :value="model.id" x-text="`${model.name} (${model.size})`"></option>
+                                <div class="flex items-center justify-between mb-2">
+                                    <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                                        <i class="fas fa-brain mr-1 text-gray-400"></i> Whisper Model
+                                    </label>
+                                    <button @click="loadSpeachesModels()" class="text-xs text-blue-500 dark:text-blue-400 hover:underline">
+                                        <i class="fas fa-sync-alt mr-0.5" :class="{'animate-spin': speachesModelsLoading}"></i> Refresh
+                                    </button>
+                                </div>
+
+                                <!-- Active model banner -->
+                                <div class="mb-3 px-3 py-2.5 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                                    <p class="text-xs text-gray-500 dark:text-gray-400 mb-0.5">Active model</p>
+                                    <p class="text-sm font-mono font-medium text-gray-900 dark:text-gray-100 truncate" x-text="settings.whisper_model || 'Not set'"></p>
+                                    <template x-if="speachesModels.find(m => m.id === settings.whisper_model)?.installed">
+                                        <p class="text-xs text-green-600 dark:text-green-400 mt-0.5"><i class="fas fa-check-circle mr-1"></i>Installed on speaches</p>
                                     </template>
-                                </select>
-                                <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">
-                                    Hviske V3 and Røst V3 are optimised for Danish. Whisper Large V3 is a solid general choice.
-                                </p>
+                                    <template x-if="speachesModels.length > 0 && !speachesModels.find(m => m.id === settings.whisper_model)?.installed">
+                                        <p class="text-xs text-orange-500 mt-0.5"><i class="fas fa-exclamation-triangle mr-1"></i>Not yet downloaded — will auto-install on first use</p>
+                                    </template>
+                                </div>
+
+                                <!-- Model list -->
+                                <div class="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden text-sm">
+
+                                    <!-- Loading -->
+                                    <div x-show="speachesModelsLoading" class="p-4 text-center text-gray-500 dark:text-gray-400">
+                                        <i class="fas fa-spinner animate-spin mr-1"></i> Loading models from speaches…
+                                    </div>
+
+                                    <!-- Error -->
+                                    <div x-show="!speachesModelsLoading && speachesModelsError" class="p-4 text-center text-orange-500">
+                                        <i class="fas fa-exclamation-circle mr-1"></i>
+                                        <span x-text="speachesModelsError"></span>
+                                    </div>
+
+                                    <!-- Installed models -->
+                                    <template x-if="!speachesModelsLoading && speachesModels.filter(m => m.installed).length > 0">
+                                        <div>
+                                            <div class="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50">
+                                                Installed
+                                            </div>
+                                            <template x-for="model in speachesModels.filter(m => m.installed)" :key="model.id">
+                                                <div @click="settings.whisper_model = model.id"
+                                                    class="flex items-center gap-3 px-3 py-2.5 border-t border-gray-100 dark:border-gray-700/50 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/40 transition"
+                                                    :class="settings.whisper_model === model.id ? 'bg-blue-50 dark:bg-blue-900/20' : ''">
+                                                    <div class="flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center"
+                                                        :class="settings.whisper_model === model.id ? 'border-blue-600 bg-blue-600' : 'border-gray-300 dark:border-gray-600'">
+                                                        <div x-show="settings.whisper_model === model.id" class="w-1.5 h-1.5 rounded-full bg-white"></div>
+                                                    </div>
+                                                    <div class="flex-1 min-w-0">
+                                                        <p class="font-mono truncate text-gray-900 dark:text-gray-100" x-text="model.id"></p>
+                                                        <div class="flex flex-wrap gap-1 mt-0.5">
+                                                            <template x-for="lang in (model.language || []).slice(0, 5)" :key="lang">
+                                                                <span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400" x-text="lang"></span>
+                                                            </template>
+                                                        </div>
+                                                    </div>
+                                                    <i class="fas fa-check-circle text-green-500 flex-shrink-0"></i>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
+
+                                    <!-- Available to download -->
+                                    <template x-if="!speachesModelsLoading && speachesModels.filter(m => !m.installed).length > 0">
+                                        <div>
+                                            <div class="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 border-t border-gray-200 dark:border-gray-700">
+                                                Available to download
+                                            </div>
+                                            <template x-for="model in speachesModels.filter(m => !m.installed)" :key="model.id">
+                                                <div class="flex items-center gap-3 px-3 py-2.5 border-t border-gray-100 dark:border-gray-700/50">
+                                                    <div class="flex-1 min-w-0">
+                                                        <p class="font-mono truncate text-gray-600 dark:text-gray-300" x-text="model.id"></p>
+                                                        <div class="flex flex-wrap gap-1 mt-0.5">
+                                                            <template x-for="lang in (model.language || []).slice(0, 5)" :key="lang">
+                                                                <span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400" x-text="lang"></span>
+                                                            </template>
+                                                        </div>
+                                                    </div>
+                                                    <button @click="confirmDownloadModel(model)"
+                                                        :disabled="model.downloading"
+                                                        class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg border border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition disabled:opacity-50 whitespace-nowrap">
+                                                        <i class="fas mr-1" :class="model.downloading ? 'fa-spinner animate-spin' : 'fa-download'"></i>
+                                                        <span x-text="model.downloading ? 'Downloading…' : 'Download'"></span>
+                                                    </button>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
+
+                                    <!-- Empty -->
+                                    <div x-show="!speachesModelsLoading && !speachesModelsError && speachesModels.length === 0"
+                                        class="p-4 text-center text-gray-400 dark:text-gray-500">
+                                        No models found in speaches registry
+                                    </div>
+                                </div>
+
+                                <!-- Download confirmation bar -->
+                                <div x-show="downloadConfirm.show" x-cloak
+                                    class="mt-2 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg flex items-center justify-between gap-3">
+                                    <p class="text-xs text-amber-800 dark:text-amber-300 flex-1">
+                                        <i class="fas fa-download mr-1"></i>
+                                        Download <span class="font-mono font-medium" x-text="downloadConfirm.model?.id"></span>?
+                                        This may take several minutes.
+                                    </p>
+                                    <div class="flex gap-2 flex-shrink-0">
+                                        <button @click="downloadConfirm = { show: false, model: null }"
+                                            class="text-xs px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition">
+                                            Cancel
+                                        </button>
+                                        <button @click="downloadModel()"
+                                            class="text-xs px-2.5 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition">
+                                            <i class="fas fa-download mr-1"></i> Download
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                             <!-- Language -->
                             <div>

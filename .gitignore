@@ -32,3 +32,5 @@ Thumbs.db
 
 # Runtime data (never commit production data)
 /data/
+
+/examples/*

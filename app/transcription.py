@@ -209,17 +209,31 @@ async def transcribe_audio(audio_data: bytes) -> dict:
             )
 
             if response.status_code == 404:
-                detail = response.json().get("detail", "")
+                try:
+                    detail = response.json().get("detail", "")
+                except Exception:
+                    detail = response.text
                 if "not installed" in detail:
-                    logger.info("Model %s not installed, downloading via speaches…", model)
+                    logger.info("Model %s not installed — attempting download via speaches…", model)
                     dl = await client.post(
-                        f"{WHISPER_URL}/v1/models",
-                        json={"model": model},
+                        f"{WHISPER_URL}/v1/models/{model}",
                         timeout=600.0,
                     )
                     if dl.status_code not in (200, 201):
-                        logger.error("Model download failed %d: %s", dl.status_code, dl.text)
-                        return {"error": f"Model download failed: {dl.text}"}
+                        logger.error(
+                            "Model %s could not be downloaded (speaches %d). "
+                            "Set WHISPER_MODEL=%s on the speaches deployment to pre-install it.",
+                            model,
+                            dl.status_code,
+                            model,
+                        )
+                        return {
+                            "error": (
+                                f"Model '{model}' is not installed on the speaches server and "
+                                f"could not be downloaded automatically. "
+                                f"Set WHISPER_MODEL={model} in the speaches deployment env vars."
+                            )
+                        }
                     logger.info("Model downloaded, retrying transcription…")
                     response = await client.post(
                         f"{WHISPER_URL}/v1/audio/transcriptions",
