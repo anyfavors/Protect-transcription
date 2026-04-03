@@ -4,8 +4,8 @@
 @variant dark (&:where(.dark, .dark *));
 
 /* Tell Tailwind where to scan for utility classes */
-@source "templates";
-@source "static";
+@source "./templates/**/*.html";
+@source "./static/**/*.js";
 
 /* Custom styles */
 [x-cloak] { display: none !important; }

@@ -2,6 +2,10 @@
 
 Authoritative guide for working in this codebase. Read this before changing anything.
 
+DO NOT GUESS, IT IS COMPLETELY FORBIDDEN TO GUESS, LIE, AND/OR CHEAT.
+
+IF YOU DO NOT KNOW SOMETHING, DONT PRETEND TO.
+
 ---
 
 ## What this project is
