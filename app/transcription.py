@@ -208,6 +208,26 @@ async def transcribe_audio(audio_data: bytes) -> dict:
                 data=data,
             )
 
+            if response.status_code == 404:
+                detail = response.json().get("detail", "")
+                if "not installed" in detail:
+                    logger.info("Model %s not installed, downloading via speaches…", model)
+                    dl = await client.post(
+                        f"{WHISPER_URL}/v1/models",
+                        json={"model": model},
+                        timeout=600.0,
+                    )
+                    if dl.status_code not in (200, 201):
+                        logger.error("Model download failed %d: %s", dl.status_code, dl.text)
+                        return {"error": f"Model download failed: {dl.text}"}
+                    logger.info("Model downloaded, retrying transcription…")
+                    response = await client.post(
+                        f"{WHISPER_URL}/v1/audio/transcriptions",
+                        files=files,
+                        data=data,
+                        timeout=300.0,
+                    )
+
             if response.status_code != 200:
                 logger.error("Whisper API error %d: %s", response.status_code, response.text)
                 return {"error": response.text}
