@@ -40,6 +40,7 @@ def _insert_transcription(db_path: str, **kwargs) -> int:
 # /api/stats
 # ─────────────────────────────────────────────────────────────
 
+
 def test_stats_empty(client):
     r = client.get("/api/stats")
     assert r.status_code == 200
@@ -65,6 +66,7 @@ def test_stats_counts(client, tmp_db):
 # ─────────────────────────────────────────────────────────────
 # /api/transcriptions (list + filter)
 # ─────────────────────────────────────────────────────────────
+
 
 def test_list_transcriptions_empty(client):
     r = client.get("/api/transcriptions")
@@ -127,6 +129,7 @@ def test_pagination(client, tmp_db):
 # /api/cameras and /api/dates
 # ─────────────────────────────────────────────────────────────
 
+
 def test_cameras_empty(client):
     r = client.get("/api/cameras")
     assert r.status_code == 200
@@ -153,6 +156,7 @@ def test_dates_empty(client):
 # DELETE /api/transcriptions/{id}
 # ─────────────────────────────────────────────────────────────
 
+
 def test_delete_transcription(client, tmp_db):
     row_id = _insert_transcription(tmp_db)
     r = client.delete(f"/api/transcriptions/{row_id}")
@@ -171,6 +175,7 @@ def test_delete_nonexistent_returns_404(client):
 # ─────────────────────────────────────────────────────────────
 # POST /api/transcriptions/{id}/retry
 # ─────────────────────────────────────────────────────────────
+
 
 def test_retry_transcription_queues_pending(client, tmp_db):
     row_id = _insert_transcription(tmp_db, status="error", event_id="evt_retry")
@@ -196,6 +201,7 @@ def test_retry_nonexistent_returns_404(client):
 # ─────────────────────────────────────────────────────────────
 # POST /api/transcriptions/retry-errors
 # ─────────────────────────────────────────────────────────────
+
 
 def test_retry_all_errors(client, tmp_db):
     _insert_transcription(tmp_db, event_id="err1", status="error")
@@ -223,6 +229,7 @@ def test_retry_all_errors_no_errors(client, tmp_db):
 # ─────────────────────────────────────────────────────────────
 # POST /api/transcriptions/retranscribe-all
 # ─────────────────────────────────────────────────────────────
+
 
 def test_retranscribe_all_completed_only(client, tmp_db):
     _insert_transcription(tmp_db, event_id="c1", status="completed", transcription="some text")
@@ -258,6 +265,7 @@ def test_retranscribe_all_include_errors(client, tmp_db):
 # ─────────────────────────────────────────────────────────────
 # GET /api/transcriptions/{id}/srt
 # ─────────────────────────────────────────────────────────────
+
 
 def test_srt_download(client, tmp_db):
     row_id = _insert_transcription(tmp_db, transcription="Hej verden")

@@ -106,18 +106,20 @@ async def get_transcriptions(
             except (KeyError, json.JSONDecodeError):
                 pass
 
-            transcriptions.append({
-                "id": row["id"],
-                "event_id": row["event_id"],
-                "camera_name": row["camera_name"],
-                "timestamp": row["timestamp"],
-                "transcription": row["transcription"],
-                "segments": segments,
-                "language": row["language"],
-                "duration_seconds": row["duration_seconds"],
-                "status": row["status"],
-                "audio_file": row["audio_file"],
-            })
+            transcriptions.append(
+                {
+                    "id": row["id"],
+                    "event_id": row["event_id"],
+                    "camera_name": row["camera_name"],
+                    "timestamp": row["timestamp"],
+                    "transcription": row["transcription"],
+                    "segments": segments,
+                    "language": row["language"],
+                    "duration_seconds": row["duration_seconds"],
+                    "status": row["status"],
+                    "audio_file": row["audio_file"],
+                }
+            )
 
         return {
             "transcriptions": transcriptions,
@@ -233,7 +235,13 @@ async def download_srt(transcription_id: int):
                 segments = json.loads(row["segments"])
 
         if not segments:
-            segments = [{"start": 0, "end": row["duration_seconds"] or 10, "text": row["transcription"] or ""}]
+            segments = [
+                {
+                    "start": 0,
+                    "end": row["duration_seconds"] or 10,
+                    "text": row["transcription"] or "",
+                }
+            ]
 
         srt_lines = []
         for i, seg in enumerate(segments, 1):
@@ -246,11 +254,9 @@ async def download_srt(transcription_id: int):
                     "",
                 ]
 
-        filename = (
-            f"{row['camera_name'] or 'unknown'}_{row['timestamp'] or 'unknown'}.srt"
-            .replace(" ", "_")
-            .replace(":", "-")
-        )
+        filename = f"{row['camera_name'] or 'unknown'}_{row['timestamp'] or 'unknown'}.srt".replace(
+            " ", "_"
+        ).replace(":", "-")
         return PlainTextResponse(
             content="\n".join(srt_lines),
             media_type="text/plain",
@@ -275,7 +281,9 @@ async def retry_transcription(transcription_id: int):
             dt = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
             timestamp_ms = int(dt.timestamp() * 1000)
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid timestamp: {row['timestamp']}") from exc
+            raise HTTPException(
+                status_code=400, detail=f"Invalid timestamp: {row['timestamp']}"
+            ) from exc
 
         event_id = row["event_id"]
         camera_id = row["camera_id"]

@@ -60,13 +60,15 @@ def get_summaries(period: str) -> dict:
     for p in periods:
         key = p["period_key"]
         s = summaries_map.get(key)
-        result.append({
-            "period_key": key,
-            "count": p["count"],
-            "summary": s["summary"] if s else None,
-            "generated_at": s["generated_at"] if s else None,
-            "stale": s is not None and s["transcription_count"] != p["count"],
-        })
+        result.append(
+            {
+                "period_key": key,
+                "count": p["count"],
+                "summary": s["summary"] if s else None,
+                "generated_at": s["generated_at"] if s else None,
+                "stale": s is not None and s["transcription_count"] != p["count"],
+            }
+        )
 
     return {"period": period, "items": result}
 

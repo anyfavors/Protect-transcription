@@ -61,7 +61,9 @@ async def fetch_audio_clip(
             elif hasattr(camera, "export_video"):
                 video_data = await camera.export_video(start_time, end_time)
             else:
-                video_methods = [m for m in dir(camera) if "video" in m.lower() or "export" in m.lower()]
+                video_methods = [
+                    m for m in dir(camera) if "video" in m.lower() or "export" in m.lower()
+                ]
                 logger.error("No video export method found. Available: %s", video_methods)
                 return None
         except TypeError as exc:
@@ -100,13 +102,19 @@ def _extract_audio(video_data: bytes) -> bytes | None:
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-y",
-                "-i", str(video_path),
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
                 "-vn",
-                "-acodec", "pcm_s16le",
-                "-ar", "16000",
-                "-ac", "1",
-                "-af", "highpass=f=200,loudnorm",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                "-af",
+                "highpass=f=200,loudnorm",
                 str(audio_path),
             ],
             capture_output=True,

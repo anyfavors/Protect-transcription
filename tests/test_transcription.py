@@ -1,6 +1,5 @@
 """Unit tests for pure transcription logic (no network, no DB)."""
 
-
 from app.transcription import _is_hallucination
 
 
@@ -26,9 +25,7 @@ class TestIsHallucination:
         assert _is_hallucination("tak tak tak tak tak tak tak tak tak tak") is True
 
     def test_trigram_loop_detected(self):
-        assert _is_hallucination(
-            "mange tak mange tak mange tak mange tak mange tak"
-        ) is True
+        assert _is_hallucination("mange tak mange tak mange tak mange tak mange tak") is True
 
     def test_four_word_loop_detected(self):
         phrase = "det ved jeg ikke"

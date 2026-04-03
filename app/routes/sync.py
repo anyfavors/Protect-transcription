@@ -23,7 +23,9 @@ async def sync_speech_events(
     """Fetch speech events from Protect for the last *hours* hours and queue any missing ones."""
     host = get_protect_host()
     if not host:
-        raise HTTPException(status_code=400, detail="Protect host not configured. Set it in Settings.")
+        raise HTTPException(
+            status_code=400, detail="Protect host not configured. Set it in Settings."
+        )
 
     try:
         client = await get_protect_client()
@@ -99,7 +101,9 @@ async def sync_speech_events(
             timestamp_ms = int(event_time.timestamp() * 1000)
 
             camera = client.bootstrap.cameras.get(camera_id)
-            camera_name: str = (camera.name or f"Unknown ({camera_id})") if camera else f"Unknown ({camera_id})"
+            camera_name: str = (
+                (camera.name or f"Unknown ({camera_id})") if camera else f"Unknown ({camera_id})"
+            )
 
             if queue_transcription(event_id, str(camera_id), camera_name, timestamp_ms, language):
                 events_queued += 1
@@ -114,7 +118,11 @@ async def sync_speech_events(
 
     logger.info(
         "Sync done: found=%d speech=%d queued=%d skipped=%d live_skipped=%d",
-        events_found, speech_events_found, events_queued, events_skipped, events_live_skipped,
+        events_found,
+        speech_events_found,
+        events_queued,
+        events_skipped,
+        events_live_skipped,
     )
 
     result: dict = {

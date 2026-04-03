@@ -15,9 +15,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _ALLOWED_KEYS = {
-    "whisper_model", "language", "buffer_before", "buffer_after", "vad_filter", "beam_size",
-    "protect_host", "ollama_url", "ollama_model",
-    "condition_on_previous_text", "no_speech_threshold", "compression_ratio_threshold",
+    "whisper_model",
+    "language",
+    "buffer_before",
+    "buffer_after",
+    "vad_filter",
+    "beam_size",
+    "protect_host",
+    "ollama_url",
+    "ollama_model",
+    "condition_on_previous_text",
+    "no_speech_threshold",
+    "compression_ratio_threshold",
 }
 
 _INT_BOUNDS = {
@@ -78,7 +87,11 @@ async def test_whisper_connection():
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{WHISPER_URL}/v1/models")
             if response.status_code == 200:
-                return {"status": "connected", "whisper_url": WHISPER_URL, "models": response.json()}
+                return {
+                    "status": "connected",
+                    "whisper_url": WHISPER_URL,
+                    "models": response.json(),
+                }
             return {"status": "error", "message": f"Whisper returned status {response.status_code}"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}

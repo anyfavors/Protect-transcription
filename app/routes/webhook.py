@@ -65,7 +65,11 @@ async def receive_webhook(request: Request):
                         if cam.mac.upper().replace(":", "").replace("-", "") == normalized_mac:
                             camera = cam
                             break
-                camera_name: str = (camera.name or f"Unknown ({camera_id})") if camera else f"Unknown ({camera_id})"
+                camera_name: str = (
+                    (camera.name or f"Unknown ({camera_id})")
+                    if camera
+                    else f"Unknown ({camera_id})"
+                )
             except Exception:
                 camera_name = f"Unknown ({camera_id})"
 

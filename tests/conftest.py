@@ -26,14 +26,17 @@ def tmp_db(tmp_path, monkeypatch) -> Generator[str, None, None]:
     os.makedirs(audio_dir, exist_ok=True)
 
     import app.config as cfg
+
     monkeypatch.setattr(cfg, "AUDIO_PATH", audio_dir)
 
     # Patch the single connection factory used by every module
     import app.database as db_mod
+
     monkeypatch.setattr(db_mod, "DATABASE_PATH", db_file)
 
     # Also patch AUDIO_PATH used by transcription routes
     import app.routes.transcriptions as trans_routes
+
     monkeypatch.setattr(trans_routes, "AUDIO_PATH", audio_dir)
 
     def _make_connection():
@@ -59,6 +62,7 @@ def tmp_db(tmp_path, monkeypatch) -> Generator[str, None, None]:
     monkeypatch.setattr(_wk, "DATABASE_PATH", db_file)
 
     from app.database import init_database
+
     init_database()
 
     yield db_file
