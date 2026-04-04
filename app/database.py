@@ -25,6 +25,12 @@ _DEFAULT_SETTINGS: dict[str, str] = {
     "condition_on_previous_text": "false",
     "no_speech_threshold": "0.6",
     "compression_ratio_threshold": "2.4",
+    # Speaker diarization (requires speaches server support)
+    "enable_diarization": "false",
+    # Noise / silence pre-filter: minimum RMS energy (0-1 normalised)
+    "min_audio_energy": "0.005",
+    # Audio compression: compress WAV to Opus/OGG after N days (0 = disabled)
+    "audio_compression_days": "7",
 }
 
 

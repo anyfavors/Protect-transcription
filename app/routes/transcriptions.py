@@ -174,6 +174,8 @@ async def get_stats():
         processing = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE status='error'")
         errors = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE status='filtered'")
+        filtered = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE DATE(timestamp)=DATE('now')")
         today = cursor.fetchone()[0]
         return {
@@ -181,6 +183,7 @@ async def get_stats():
             "completed": completed,
             "processing": processing,
             "errors": errors,
+            "filtered": filtered,
             "today": today,
         }
     finally:
@@ -467,12 +470,16 @@ async def bulk_retry(request: Request):
             conn.close()
 
 
+_AUDIO_MIME = {".wav": "audio/wav", ".ogg": "audio/ogg", ".opus": "audio/opus"}
+
+
 @router.get("/audio/{filename}")
 async def get_audio(filename: str):
     file_path = Path(AUDIO_PATH) / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
-    return FileResponse(file_path, media_type="audio/wav", filename=filename)
+    mime = _AUDIO_MIME.get(file_path.suffix, "application/octet-stream")
+    return FileResponse(file_path, media_type=mime, filename=filename)
 
 
 @router.post("/api/database/reset")

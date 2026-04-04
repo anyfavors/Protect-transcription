@@ -4,7 +4,7 @@ function transcribeApp() {
         transcriptions: [],
         cameras: [],
         dates: [],
-        stats: { total: 0, completed: 0, processing: 0, errors: 0, today: 0 },
+        stats: { total: 0, completed: 0, processing: 0, errors: 0, filtered: 0, today: 0 },
         filters: { search: '', camera: '', date: '', status: '' },
         pagination: { page: 1, per_page: 20, total: 0, pages: 0 },
         confirmModal: { show: false, action: '', title: '', message: '', item: null, loading: false },
@@ -37,6 +37,14 @@ function transcribeApp() {
         summaryPeriod: 'daily',
         summaryItems: [],
         summariesLoading: false,
+        // Analytics modal
+        showAnalytics: false,
+        analyticsTab: 'hourly',
+        analyticsLoading: false,
+        analyticsData: null,
+        analyticsDays: 30,
+        // Storage stats
+        storageStats: null,
         // Dark mode
         darkMode: document.documentElement.classList.contains('dark'),
         // Toast stack
@@ -53,6 +61,9 @@ function transcribeApp() {
         onboarding: { checked: false, nvrOk: null, whisperOk: null, loading: false },
         // Bulk selection
         selectedIds: [],
+        // WebSocket
+        _ws: null,
+        _wsRetryDelay: 1000,
         settings: {
             whisper_model: 'Systran/faster-whisper-large-v3',
             language: 'da',
@@ -66,6 +77,9 @@ function transcribeApp() {
             condition_on_previous_text: 'false',
             no_speech_threshold: '0.6',
             compression_ratio_threshold: '2.4',
+            enable_diarization: 'false',
+            min_audio_energy: '0.005',
+            audio_compression_days: '7',
         },
         availableLanguages: [],
 
@@ -76,6 +90,30 @@ function transcribeApp() {
             await this.loadSettings();
             this.checkOnboarding();
             this.schedulePoll();
+            this._connectWebSocket();
+        },
+
+        // ── WebSocket ──────────────────────────────────────────────
+        _connectWebSocket() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = `${proto}//${location.host}/ws`;
+            try {
+                this._ws = new WebSocket(url);
+                this._ws.onopen = () => { this._wsRetryDelay = 1000; };
+                this._ws.onmessage = (e) => {
+                    try {
+                        const msg = JSON.parse(e.data);
+                        if (msg.type === 'transcription_update') {
+                            this.loadAll();
+                        }
+                    } catch { /* ignore */ }
+                };
+                this._ws.onclose = () => {
+                    setTimeout(() => this._connectWebSocket(), this._wsRetryDelay);
+                    this._wsRetryDelay = Math.min(this._wsRetryDelay * 2, 30000);
+                };
+                this._ws.onerror = () => { this._ws?.close(); };
+            } catch { /* WebSocket not available, rely on polling */ }
         },
 
         schedulePoll() {
@@ -525,6 +563,76 @@ function transcribeApp() {
                 }
             } catch (e) { this.syncResult = { status: 'error', message: e.message }; }
             finally { this.syncLoading = false; this.endOp('sync'); }
+        },
+
+        // ── Analytics ────────────────────────────────────────────
+        openAnalytics() {
+            this.showAnalytics = true;
+            this.loadAnalytics();
+        },
+
+        async loadAnalytics() {
+            this.analyticsLoading = true;
+            this.analyticsData = null;
+            try {
+                const tab = this.analyticsTab;
+                let url;
+                if (tab === 'hourly') url = `/api/analytics/hourly?days=${this.analyticsDays}`;
+                else if (tab === 'daily') url = `/api/analytics/daily?days=${this.analyticsDays}`;
+                else if (tab === 'cameras') url = '/api/analytics/cameras';
+                else if (tab === 'languages') url = '/api/analytics/languages';
+                this.analyticsData = await (await fetch(url)).json();
+            } catch (e) { this.showToast('Failed to load analytics: ' + e.message, 'error'); }
+            finally { this.analyticsLoading = false; }
+        },
+
+        maxOf(arr, key) {
+            return Math.max(1, ...arr.map(i => i[key] || 0));
+        },
+
+        barPercent(val, max) {
+            return max > 0 ? Math.round((val / max) * 100) : 0;
+        },
+
+        // ── Storage stats ────────────────────────────────────────
+        async loadStorageStats() {
+            try {
+                this.storageStats = await (await fetch('/api/storage')).json();
+            } catch { /* ignore */ }
+        },
+
+        formatBytes(bytes) {
+            if (!bytes || bytes === 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            let i = 0;
+            let b = bytes;
+            while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+            return b.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+        },
+
+        // ── Export ───────────────────────────────────────────────
+        exportCsv() {
+            const p = this._exportParams();
+            window.open(`/api/export/csv?${p}`, '_blank');
+        },
+
+        exportJson() {
+            const p = this._exportParams();
+            window.open(`/api/export/json?${p}`, '_blank');
+        },
+
+        exportSrtZip() {
+            const p = this._exportParams();
+            window.open(`/api/export/srt?${p}`, '_blank');
+        },
+
+        _exportParams() {
+            const p = new URLSearchParams();
+            if (this.filters.camera) p.append('camera', this.filters.camera);
+            if (this.filters.date) { p.append('from', this.filters.date); p.append('to', this.filters.date); }
+            if (this.filters.status) p.append('status', this.filters.status);
+            if (this.filters.search) p.append('search', this.filters.search);
+            return p.toString();
         },
 
         async performReset() {

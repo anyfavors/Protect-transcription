@@ -1,10 +1,13 @@
 """
-Audio fetching, ffmpeg extraction, and Whisper transcription.
+Audio fetching, ffmpeg extraction, Whisper transcription, and audio analysis.
 """
 
+import io
 import logging
+import struct
 import subprocess
 import tempfile
+import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +18,29 @@ from app.database import get_settings
 from app.protect import get_protect_client
 
 logger = logging.getLogger(__name__)
+
+
+def compute_audio_rms(audio_data: bytes) -> float:
+    """
+    Compute the RMS energy of 16-bit PCM WAV audio, normalised to 0-1.
+
+    Returns 0.0 for empty or unparseable audio.
+    """
+    try:
+        with wave.open(io.BytesIO(audio_data), "rb") as wf:
+            n_frames = wf.getnframes()
+            if n_frames == 0:
+                return 0.0
+            raw = wf.readframes(n_frames)
+            n_samples = len(raw) // 2
+            if n_samples == 0:
+                return 0.0
+            samples = struct.unpack(f"<{n_samples}h", raw)
+            rms = (sum(s * s for s in samples) / n_samples) ** 0.5
+            return rms / 32768.0
+    except Exception as exc:
+        logger.warning("Could not compute audio RMS: %s", exc)
+        return 0.0
 
 
 async def fetch_audio_clip(
@@ -175,6 +201,8 @@ async def transcribe_audio(audio_data: bytes) -> dict:
     no_speech_threshold = settings.get("no_speech_threshold", "0.6")
     compression_ratio_threshold = settings.get("compression_ratio_threshold", "2.4")
 
+    enable_diarization = settings.get("enable_diarization", "false").lower() == "true"
+
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
             files = {"file": ("audio.wav", audio_data, "audio/wav")}
@@ -193,6 +221,8 @@ async def transcribe_audio(audio_data: bytes) -> dict:
             }
             if vad_filter:
                 data["vad_filter"] = "true"
+            if enable_diarization:
+                data["diarize"] = "true"
 
             logger.info(
                 "Transcribing model=%s lang=%s vad=%s condition_on_previous=%s",

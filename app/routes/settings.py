@@ -27,12 +27,18 @@ _ALLOWED_KEYS = {
     "condition_on_previous_text",
     "no_speech_threshold",
     "compression_ratio_threshold",
+    "enable_diarization",
+    "min_audio_energy",
+    "audio_compression_days",
 }
+
+_BOOL_KEYS = {"vad_filter", "condition_on_previous_text", "enable_diarization"}
 
 _INT_BOUNDS = {
     "buffer_before": (1, 60),
     "buffer_after": (1, 600),
     "beam_size": (1, 10),
+    "audio_compression_days": (0, 365),
 }
 
 
@@ -63,7 +69,7 @@ async def api_update_settings(request: Request):
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        if key == "vad_filter":
+        if key in _BOOL_KEYS:
             value = "true" if value in (True, "true", "1", 1) else "false"
 
         if key == "protect_host":

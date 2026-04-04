@@ -1,17 +1,23 @@
 """
-Background transcription worker and queue helpers.
+Background transcription worker, audio compression worker, and queue helpers.
 """
 
 import asyncio
 import json
 import logging
 import sqlite3
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.config import AUDIO_PATH, DATABASE_PATH, LOCAL_TZ
 from app.database import get_settings
-from app.transcription import fetch_audio_clip, save_audio_file, transcribe_audio
+from app.transcription import (
+    compute_audio_rms,
+    fetch_audio_clip,
+    save_audio_file,
+    transcribe_audio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +123,39 @@ async def process_pending_transcription(row: dict) -> None:
                 return
             audio_data = fetched
             audio_filename = save_audio_file(audio_data, event_time, camera_name)
+
+        # ── Noise / silence pre-filter ──────────────────────────────
+        min_energy = float(settings.get("min_audio_energy", "0.005"))
+        if min_energy > 0:
+            rms = compute_audio_rms(audio_data)
+            if rms < min_energy:
+                duration = len(audio_data) / (16000 * 2)
+                logger.info(
+                    "Audio filtered (RMS %.5f < %.5f) for event %s",
+                    rms,
+                    min_energy,
+                    event_id,
+                )
+                cursor.execute(
+                    """
+                    UPDATE transcriptions
+                    SET status='filtered',
+                        transcription=?,
+                        audio_file=?,
+                        duration_seconds=?
+                    WHERE id=?
+                    """,
+                    (
+                        f"Silence/noise detected (RMS energy {rms:.5f} below threshold {min_energy})",
+                        audio_filename,
+                        duration,
+                        record_id,
+                    ),
+                )
+                conn.commit()
+                await _broadcast_update(record_id, "filtered", camera_name, timestamp_str)
+                return
+
         result = await transcribe_audio(audio_data)
 
         if "error" in result:
@@ -154,6 +193,9 @@ async def process_pending_transcription(row: dict) -> None:
 
         conn.commit()
         logger.info("Completed event %s from %s", event_id, camera_name)
+
+        final_status = "error" if "error" in result else "completed"
+        await _broadcast_update(record_id, final_status, camera_name, timestamp_str)
 
     except Exception as exc:
         logger.exception("Error processing event %s: %s", event_id, exc)
@@ -214,6 +256,110 @@ async def transcription_worker() -> None:
         except Exception as exc:
             logger.exception("Error in transcription worker: %s", exc)
             await asyncio.sleep(10)
+
+
+async def _broadcast_update(record_id: int, status: str, camera_name: str, timestamp: str) -> None:
+    """Push a transcription status change to all connected WebSocket clients."""
+    from app.broadcast import broadcast
+
+    await broadcast(
+        {
+            "type": "transcription_update",
+            "id": record_id,
+            "status": status,
+            "camera_name": camera_name,
+            "timestamp": timestamp,
+        }
+    )
+
+
+async def audio_compression_worker() -> None:
+    """
+    Periodically compress old WAV audio files to Opus/OGG.
+
+    Runs hourly.  Controlled by the ``audio_compression_days`` setting:
+    WAV files referenced by transcriptions older than N days are converted
+    to OGG (libopus @ 32 kbps), the original is deleted, and the DB is updated.
+    Set to 0 to disable.
+    """
+    logger.info("Audio compression worker started")
+
+    while True:
+        try:
+            await asyncio.sleep(3600)
+
+            settings = get_settings()
+            days = int(settings.get("audio_compression_days", "7"))
+            if days <= 0:
+                continue
+
+            conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, audio_file FROM transcriptions "
+                "WHERE audio_file LIKE '%.wav' AND timestamp < datetime('now', ?)",
+                (f"-{days} days",),
+            )
+            rows = cursor.fetchall()
+            conn.close()
+
+            if not rows:
+                continue
+
+            compressed = 0
+            for row_id, audio_file in rows:
+                wav_path = Path(AUDIO_PATH) / audio_file
+                if not wav_path.exists():
+                    continue
+
+                ogg_name = audio_file.rsplit(".", 1)[0] + ".ogg"
+                ogg_path = Path(AUDIO_PATH) / ogg_name
+
+                try:
+                    result = subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(wav_path),
+                            "-c:a",
+                            "libopus",
+                            "-b:a",
+                            "32k",
+                            "-vbr",
+                            "on",
+                            str(ogg_path),
+                        ],
+                        capture_output=True,
+                        timeout=60,
+                    )
+                except subprocess.TimeoutExpired:
+                    logger.warning("ffmpeg timeout compressing %s", audio_file)
+                    ogg_path.unlink(missing_ok=True)
+                    continue
+
+                if result.returncode == 0 and ogg_path.exists() and ogg_path.stat().st_size > 0:
+                    wav_path.unlink(missing_ok=True)
+                    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute(
+                        "UPDATE transcriptions SET audio_file=? WHERE id=?",
+                        (ogg_name, row_id),
+                    )
+                    conn.commit()
+                    conn.close()
+                    compressed += 1
+                else:
+                    ogg_path.unlink(missing_ok=True)
+                    logger.warning("Failed to compress %s (rc=%d)", audio_file, result.returncode)
+
+            if compressed:
+                logger.info("Compressed %d audio files to Opus/OGG", compressed)
+
+        except Exception as exc:
+            logger.exception("Audio compression worker error: %s", exc)
+            await asyncio.sleep(60)
 
 
 # ---------------------------------------------------------------------------

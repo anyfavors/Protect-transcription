@@ -34,6 +34,10 @@
                 class="w-9 h-9 rounded-lg flex items-center justify-center text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 transition">
                 <i class="fas fa-cloud-download-alt" aria-hidden="true"></i>
             </button>
+            <button @click="openAnalytics()" title="Analytics" aria-label="Analytics"
+                class="w-9 h-9 rounded-lg flex items-center justify-center text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 transition">
+                <i class="fas fa-chart-area" aria-hidden="true"></i>
+            </button>
             <button @click="openSummaries()" title="Summaries" aria-label="Summaries"
                 class="w-9 h-9 rounded-lg flex items-center justify-center text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 transition">
                 <i class="fas fa-chart-bar" aria-hidden="true"></i>
@@ -101,6 +105,15 @@
             <span class="font-bold" x-text="stats.errors"></span>
             <span class="opacity-75">errors</span>
         </button>
+        <button x-show="stats.filtered > 0" @click="filters.status = 'filtered'; pagination.page = 1; loadTranscriptions()"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition border"
+            :class="filters.status === 'filtered'
+                ? 'bg-gray-600 text-white border-gray-600'
+                : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:border-gray-400'">
+            <i class="fas fa-volume-mute text-xs"></i>
+            <span class="font-bold" x-text="stats.filtered"></span>
+            <span class="opacity-75">filtered</span>
+        </button>
         <button @click="setQuickFilter('today')"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition border"
             :class="filters.date === new Date().toISOString().split('T')[0]
@@ -152,6 +165,7 @@
             <option value="processing">Processing</option>
             <option value="error">Error</option>
             <option value="pending">Pending</option>
+            <option value="filtered">Filtered</option>
         </select>
         <!-- Clear -->
         <button x-show="filters.search || filters.camera || filters.date || filters.status"
@@ -159,6 +173,30 @@
             class="text-sm px-2.5 py-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition" title="Clear filters" aria-label="Clear all filters">
             <i class="fas fa-times" aria-hidden="true"></i>
         </button>
+        <!-- Export dropdown -->
+        <div class="relative" x-data="{ exportOpen: false }">
+            <button @click="exportOpen = !exportOpen" @click.away="exportOpen = false"
+                class="text-sm px-2.5 py-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition flex items-center gap-1" title="Export" aria-label="Export transcriptions">
+                <i class="fas fa-download" aria-hidden="true"></i>
+                <span class="hidden sm:inline">Export</span>
+                <i class="fas fa-chevron-down text-[10px]"></i>
+            </button>
+            <div x-show="exportOpen" x-cloak x-transition
+                class="absolute right-0 mt-1 w-44 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl z-20 py-1">
+                <button @click="exportCsv(); exportOpen = false"
+                    class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 transition text-gray-700 dark:text-gray-300">
+                    <i class="fas fa-file-csv mr-2 text-green-500"></i> Export CSV
+                </button>
+                <button @click="exportJson(); exportOpen = false"
+                    class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 transition text-gray-700 dark:text-gray-300">
+                    <i class="fas fa-file-code mr-2 text-blue-500"></i> Export JSON
+                </button>
+                <button @click="exportSrtZip(); exportOpen = false"
+                    class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 transition text-gray-700 dark:text-gray-300">
+                    <i class="fas fa-file-archive mr-2 text-purple-500"></i> Export SRT (ZIP)
+                </button>
+            </div>
+        </div>
     </div>
 
     <!-- ═══════════════════════════ TRANSCRIPTION LIST ═══════════════════════════ -->
@@ -265,13 +303,15 @@
                                                 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400': item.status === 'completed',
                                                 'bg-yellow-100 dark:bg-yellow-900/40 text-yellow-700 dark:text-yellow-400': item.status === 'processing',
                                                 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-400': item.status === 'error',
-                                                'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400': item.status === 'pending'
+                                                'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400': item.status === 'pending',
+                                                'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-500': item.status === 'filtered'
                                             }">
                                             <i class="fas text-[10px]" :class="{
                                                 'fa-check-circle': item.status === 'completed',
                                                 'fa-spinner fa-spin': item.status === 'processing',
                                                 'fa-exclamation-circle': item.status === 'error',
-                                                'fa-hourglass-half': item.status === 'pending'
+                                                'fa-hourglass-half': item.status === 'pending',
+                                                'fa-volume-mute': item.status === 'filtered'
                                             }"></i>
                                             <span x-text="item.status" class="capitalize"></span>
                                         </span>
@@ -302,6 +342,13 @@
                                                             :title="'Jump to ' + formatSegmentTime(seg.start)"
                                                             @click="seekAudio(item.id, seg.start)"
                                                             x-text="formatSegmentTime(seg.start)"></span>
+                                                        <span x-show="seg.speaker"
+                                                            class="text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 shrink-0"
+                                                            :class="{'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300': seg.speaker === 'SPEAKER_00',
+                                                                     'bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300': seg.speaker === 'SPEAKER_01',
+                                                                     'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300': seg.speaker === 'SPEAKER_02',
+                                                                     'bg-pink-100 dark:bg-pink-900/40 text-pink-700 dark:text-pink-300': seg.speaker !== 'SPEAKER_00' && seg.speaker !== 'SPEAKER_01' && seg.speaker !== 'SPEAKER_02'}"
+                                                            x-text="seg.speaker?.replace('SPEAKER_0','S')?.replace('SPEAKER_','S')"></span>
                                                         <span class="transition-colors"
                                                             :class="isSegmentActive(item.id, seg.start, seg.end)
                                                                 ? 'text-blue-900 dark:text-blue-100 font-medium'
@@ -348,6 +395,13 @@
                                     <div x-show="item.status === 'processing'"
                                         class="text-sm text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/50 rounded-lg px-3 py-2 mb-2">
                                         <i class="fas fa-spinner fa-spin mr-1 text-xs"></i> Processing audio…
+                                    </div>
+
+                                    <!-- Filtered -->
+                                    <div x-show="item.status === 'filtered'"
+                                        class="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/30 border border-gray-200 dark:border-gray-700/50 rounded-lg px-3 py-2 mb-2">
+                                        <i class="fas fa-volume-mute mr-1 text-xs"></i>
+                                        <span x-text="item.transcription || 'Filtered (silence/noise)'"></span>
                                     </div>
 
                                     <!-- Audio player -->
@@ -729,6 +783,34 @@
                                     </div>
                                 </div>
                             </div>
+                            <!-- Speaker diarization -->
+                            <div class="flex items-center justify-between py-2">
+                                <div>
+                                    <p class="text-sm font-medium text-gray-700 dark:text-gray-300"><i class="fas fa-users mr-1 text-gray-400"></i> Speaker diarization</p>
+                                    <p class="text-xs text-gray-500 dark:text-gray-500">Identify who spoke when (requires speaches support)</p>
+                                </div>
+                                <button @click="settings.enable_diarization = settings.enable_diarization === 'true' ? 'false' : 'true'"
+                                    :class="settings.enable_diarization === 'true' ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'"
+                                    class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0">
+                                    <span :class="settings.enable_diarization === 'true' ? 'translate-x-6' : 'translate-x-1'"
+                                        class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform shadow"></span>
+                                </button>
+                            </div>
+                            <!-- Noise filter -->
+                            <div class="border border-teal-200 dark:border-teal-900/50 rounded-xl p-4 space-y-3">
+                                <div>
+                                    <p class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                                        <i class="fas fa-volume-mute mr-1 text-teal-400"></i> Noise / silence filter
+                                    </p>
+                                    <p class="text-xs text-gray-500 dark:text-gray-500">Skip transcription when audio energy is below threshold (saves processing time)</p>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Min audio energy <span class="font-normal text-gray-400">(0–1, 0 = disabled)</span></label>
+                                    <input type="number" step="0.001" min="0" max="1" x-model="settings.min_audio_energy"
+                                        class="w-32 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 outline-none">
+                                    <p class="text-xs text-gray-400 mt-0.5">Default 0.005. Set to 0 to disable filtering entirely.</p>
+                                </div>
+                            </div>
                         </div>
                     </template>
 
@@ -835,6 +917,55 @@
                                             <i class="fas fa-times-circle mr-1"></i> <span x-text="syncResult.message"></span>
                                         </p>
                                     </template>
+                                </div>
+                            </div>
+
+                            <!-- Storage stats -->
+                            <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-4" x-init="loadStorageStats()">
+                                <div class="flex items-center justify-between mb-3">
+                                    <div>
+                                        <p class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                                            <i class="fas fa-hdd mr-1 text-teal-400"></i> Storage usage
+                                        </p>
+                                        <p class="text-xs text-gray-500 dark:text-gray-500">Audio files and database disk usage</p>
+                                    </div>
+                                    <button @click="loadStorageStats()" class="text-xs text-blue-500 hover:underline"><i class="fas fa-sync-alt mr-0.5"></i> Refresh</button>
+                                </div>
+                                <div x-show="storageStats" class="space-y-2">
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <div class="bg-gray-50 dark:bg-gray-900/50 rounded-lg px-3 py-2">
+                                            <p class="text-xs text-gray-500 dark:text-gray-400">Total</p>
+                                            <p class="text-sm font-semibold text-gray-800 dark:text-gray-200" x-text="formatBytes(storageStats?.total_bytes)"></p>
+                                        </div>
+                                        <div class="bg-gray-50 dark:bg-gray-900/50 rounded-lg px-3 py-2">
+                                            <p class="text-xs text-gray-500 dark:text-gray-400">Database</p>
+                                            <p class="text-sm font-semibold text-gray-800 dark:text-gray-200" x-text="formatBytes(storageStats?.database_bytes)"></p>
+                                        </div>
+                                        <div class="bg-gray-50 dark:bg-gray-900/50 rounded-lg px-3 py-2">
+                                            <p class="text-xs text-gray-500 dark:text-gray-400">WAV files</p>
+                                            <p class="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                                                <span x-text="storageStats?.wav_files || 0"></span>
+                                                <span class="text-xs font-normal text-gray-400" x-text="'(' + formatBytes(storageStats?.wav_bytes) + ')'"></span>
+                                            </p>
+                                        </div>
+                                        <div class="bg-gray-50 dark:bg-gray-900/50 rounded-lg px-3 py-2">
+                                            <p class="text-xs text-gray-500 dark:text-gray-400">OGG files (compressed)</p>
+                                            <p class="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                                                <span x-text="storageStats?.ogg_files || 0"></span>
+                                                <span class="text-xs font-normal text-gray-400" x-text="'(' + formatBytes(storageStats?.ogg_bytes) + ')'"></span>
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <!-- Compression setting -->
+                                    <div class="flex items-center gap-2 mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                                        <label class="text-xs text-gray-600 dark:text-gray-400">Auto-compress WAV after</label>
+                                        <input type="number" x-model="settings.audio_compression_days" min="0" max="365"
+                                            class="w-16 px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 outline-none">
+                                        <span class="text-xs text-gray-400">days (0 = off)</span>
+                                    </div>
+                                </div>
+                                <div x-show="!storageStats" class="text-sm text-gray-400 py-2">
+                                    <i class="fas fa-spinner fa-spin mr-1"></i> Loading…
                                 </div>
                             </div>
 
@@ -1008,6 +1139,153 @@
                             </div>
                         </div>
                     </template>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════ ANALYTICS MODAL ═══════════════════════════ -->
+    <div x-show="showAnalytics" x-cloak class="fixed inset-0 z-50 overflow-y-auto"
+        @keydown.escape.window="showAnalytics = false"
+        role="dialog" aria-modal="true" aria-label="Analytics">
+        <div class="flex items-center justify-center min-h-screen px-4 py-8">
+            <div class="fixed inset-0 bg-black/60" @click="showAnalytics = false"></div>
+            <div class="relative bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 w-full max-w-4xl max-h-[90vh] flex flex-col">
+                <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+                    <h2 class="font-semibold text-gray-900 dark:text-gray-100"><i class="fas fa-chart-area mr-2 text-teal-400"></i>Analytics</h2>
+                    <button @click="showAnalytics = false" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition" aria-label="Close analytics">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                    </button>
+                </div>
+                <!-- Tabs -->
+                <div class="flex border-b border-gray-200 dark:border-gray-700 flex-shrink-0 overflow-x-auto">
+                    <template x-for="tab in [{id:'hourly',icon:'fa-clock',label:'Hourly'},{id:'daily',icon:'fa-calendar-day',label:'Daily'},{id:'cameras',icon:'fa-video',label:'Cameras'},{id:'languages',icon:'fa-language',label:'Languages'}]" :key="tab.id">
+                        <button @click="analyticsTab = tab.id; loadAnalytics()"
+                            class="px-4 py-3 text-sm font-medium whitespace-nowrap transition border-b-2 -mb-px"
+                            :class="analyticsTab === tab.id
+                                ? 'border-teal-600 text-teal-600 dark:text-teal-400'
+                                : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'">
+                            <i class="fas mr-1.5" :class="tab.icon"></i>
+                            <span x-text="tab.label"></span>
+                        </button>
+                    </template>
+                </div>
+                <!-- Days selector for hourly/daily -->
+                <div x-show="analyticsTab === 'hourly' || analyticsTab === 'daily'" class="flex items-center gap-2 px-5 pt-3">
+                    <label class="text-xs text-gray-500 dark:text-gray-400">Last</label>
+                    <select x-model="analyticsDays" @change="loadAnalytics()"
+                        class="text-xs bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-2 py-1 text-gray-700 dark:text-gray-300">
+                        <option value="7">7 days</option>
+                        <option value="14">14 days</option>
+                        <option value="30">30 days</option>
+                        <option value="90">90 days</option>
+                        <option value="365">1 year</option>
+                    </select>
+                </div>
+                <!-- Body -->
+                <div class="overflow-y-auto flex-1 p-5">
+                    <div x-show="analyticsLoading" class="text-center py-16 text-gray-400">
+                        <i class="fas fa-spinner fa-spin text-2xl mb-2 block"></i> Loading…
+                    </div>
+
+                    <!-- ── Hourly ── -->
+                    <div x-show="!analyticsLoading && analyticsTab === 'hourly' && analyticsData?.hours">
+                        <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Events by hour of day</h3>
+                        <div class="space-y-1">
+                            <template x-for="h in analyticsData?.hours || []" :key="h.hour">
+                                <div class="flex items-center gap-2">
+                                    <span class="text-xs font-mono text-gray-500 dark:text-gray-400 w-8 text-right" x-text="String(h.hour).padStart(2, '0') + ':00'"></span>
+                                    <div class="flex-1 h-5 bg-gray-100 dark:bg-gray-700 rounded overflow-hidden">
+                                        <div class="h-full bg-teal-500 dark:bg-teal-600 rounded transition-all duration-300"
+                                            :style="'width:' + barPercent(h.count, maxOf(analyticsData.hours, 'count')) + '%'"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500 dark:text-gray-400 w-8 text-right" x-text="h.count"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- ── Daily ── -->
+                    <div x-show="!analyticsLoading && analyticsTab === 'daily' && analyticsData?.days">
+                        <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Events per day</h3>
+                        <div class="space-y-1 max-h-[60vh] overflow-y-auto">
+                            <template x-for="d in analyticsData?.days || []" :key="d.day">
+                                <div class="flex items-center gap-2">
+                                    <span class="text-xs font-mono text-gray-500 dark:text-gray-400 w-20 shrink-0" x-text="d.day"></span>
+                                    <div class="flex-1 h-5 bg-gray-100 dark:bg-gray-700 rounded overflow-hidden flex">
+                                        <div class="h-full bg-green-500 transition-all duration-300"
+                                            :style="'width:' + barPercent(d.completed, maxOf(analyticsData.days, 'total')) + '%'" title="Completed"></div>
+                                        <div class="h-full bg-red-400 transition-all duration-300"
+                                            :style="'width:' + barPercent(d.errors, maxOf(analyticsData.days, 'total')) + '%'" title="Errors"></div>
+                                        <div class="h-full bg-gray-400 transition-all duration-300"
+                                            :style="'width:' + barPercent(d.filtered, maxOf(analyticsData.days, 'total')) + '%'" title="Filtered"></div>
+                                    </div>
+                                    <span class="text-xs text-gray-500 dark:text-gray-400 w-8 text-right" x-text="d.total"></span>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="flex items-center gap-4 mt-3 text-xs text-gray-500 dark:text-gray-400">
+                            <span><span class="inline-block w-3 h-3 rounded bg-green-500 mr-1 align-middle"></span>Completed</span>
+                            <span><span class="inline-block w-3 h-3 rounded bg-red-400 mr-1 align-middle"></span>Errors</span>
+                            <span><span class="inline-block w-3 h-3 rounded bg-gray-400 mr-1 align-middle"></span>Filtered</span>
+                        </div>
+                    </div>
+
+                    <!-- ── Cameras ── -->
+                    <div x-show="!analyticsLoading && analyticsTab === 'cameras' && analyticsData?.cameras">
+                        <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Camera statistics</h3>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead>
+                                    <tr class="text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+                                        <th class="text-left py-2 font-medium">Camera</th>
+                                        <th class="text-right py-2 font-medium">Total</th>
+                                        <th class="text-right py-2 font-medium">Done</th>
+                                        <th class="text-right py-2 font-medium">Errors</th>
+                                        <th class="text-right py-2 font-medium">Filtered</th>
+                                        <th class="text-right py-2 font-medium">Avg duration</th>
+                                        <th class="text-right py-2 font-medium">Avg confidence</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="cam in analyticsData?.cameras || []" :key="cam.camera_name">
+                                        <tr class="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                                            <td class="py-2 font-medium text-gray-800 dark:text-gray-200" x-text="cam.camera_name"></td>
+                                            <td class="py-2 text-right" x-text="cam.total"></td>
+                                            <td class="py-2 text-right text-green-600 dark:text-green-400" x-text="cam.completed"></td>
+                                            <td class="py-2 text-right text-red-500" x-text="cam.errors"></td>
+                                            <td class="py-2 text-right text-gray-400" x-text="cam.filtered"></td>
+                                            <td class="py-2 text-right" x-text="cam.avg_duration ? cam.avg_duration + 's' : '—'"></td>
+                                            <td class="py-2 text-right" x-text="cam.avg_confidence ? (cam.avg_confidence * 100).toFixed(1) + '%' : '—'"></td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- ── Languages ── -->
+                    <div x-show="!analyticsLoading && analyticsTab === 'languages' && analyticsData?.languages">
+                        <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Language distribution</h3>
+                        <div class="space-y-2">
+                            <template x-for="l in analyticsData?.languages || []" :key="l.language">
+                                <div class="flex items-center gap-3">
+                                    <span class="text-sm font-medium text-gray-700 dark:text-gray-300 w-12 uppercase" x-text="l.language"></span>
+                                    <div class="flex-1 h-6 bg-gray-100 dark:bg-gray-700 rounded overflow-hidden">
+                                        <div class="h-full bg-indigo-500 dark:bg-indigo-600 rounded transition-all duration-300"
+                                            :style="'width:' + barPercent(l.count, maxOf(analyticsData.languages, 'count')) + '%'"></div>
+                                    </div>
+                                    <span class="text-sm text-gray-500 dark:text-gray-400 w-12 text-right" x-text="l.count"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- ── No data ── -->
+                    <div x-show="!analyticsLoading && !analyticsData" class="text-center py-16 text-gray-400 dark:text-gray-600">
+                        <i class="fas fa-chart-area text-3xl mb-3 block"></i>
+                        <p>No data available yet.</p>
+                    </div>
                 </div>
             </div>
         </div>

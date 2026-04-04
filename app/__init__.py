@@ -17,8 +17,18 @@ from fastapi.templating import Jinja2Templates
 from app.config import AUDIO_PATH
 from app.database import init_database
 from app.protect import close_protect_client, get_protect_client
-from app.routes import health, settings, summaries, sync, transcriptions, webhook
-from app.worker import transcription_worker
+from app.routes import (
+    analytics,
+    export,
+    health,
+    settings,
+    summaries,
+    sync,
+    transcriptions,
+    webhook,
+    ws,
+)
+from app.worker import audio_compression_worker, transcription_worker
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +48,20 @@ async def lifespan(application: FastAPI):
         logger.warning("Could not connect to Protect on startup: %s", exc)
 
     worker_task = asyncio.create_task(transcription_worker())
+    compression_task = asyncio.create_task(audio_compression_worker())
     logger.info("Transcription worker started")
+    logger.info("Audio compression worker started")
 
     yield
 
     # Shutdown
     worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        logger.info("Transcription worker cancelled")
+    compression_task.cancel()
+    for task, name in ((worker_task, "Transcription"), (compression_task, "Compression")):
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info("%s worker cancelled", name)
 
     await close_protect_client()
 
@@ -72,6 +86,9 @@ for _router in (
     settings.router,
     summaries.router,
     sync.router,
+    analytics.router,
+    export.router,
+    ws.router,
 ):
     app.include_router(_router)
 
