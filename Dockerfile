@@ -1,4 +1,19 @@
-# Use a stable slim version
+# ── Stage 1: Compile Tailwind CSS with Node.js ──────────────────────────────
+FROM node:22-slim AS tailwind
+
+WORKDIR /build
+
+# Install tailwindcss v4 via npm (includes full theme, unlike standalone CLI)
+RUN npm install tailwindcss @tailwindcss/cli
+
+# Copy only what the Tailwind compiler needs to scan for classes
+COPY app.css.src .
+COPY templates/ templates/
+COPY static/ static/
+
+RUN npx @tailwindcss/cli -i app.css.src -o static/app.css --minify
+
+# ── Stage 2: Python application ─────────────────────────────────────────────
 FROM python:3.12-slim
 
 # Environment variables
@@ -23,22 +38,10 @@ COPY requirements.txt .
 # Install Python packages using uv
 RUN uv pip install --system --no-cache -r requirements.txt
 
-# Download Tailwind v4 standalone CLI and compile CSS
-COPY app.css.src .
+# Copy static assets and compiled CSS from Tailwind stage
 COPY static/ static/
 COPY templates/ templates/
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-      amd64) TW_ARCH="linux-x64" ;; \
-      arm64) TW_ARCH="linux-arm64" ;; \
-      arm*)  TW_ARCH="linux-armv7" ;; \
-      *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
-    esac && \
-    curl -fsSL "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-${TW_ARCH}" \
-         -o /usr/local/bin/tailwindcss && \
-    chmod +x /usr/local/bin/tailwindcss && \
-    tailwindcss -i app.css.src -o static/app.css --minify && \
-    rm /usr/local/bin/tailwindcss
+COPY --from=tailwind /build/static/app.css static/app.css
 
 # Copy application source
 COPY app/ app/

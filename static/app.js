@@ -20,8 +20,7 @@ function transcribeApp() {
         speachesModelsLoading: false,
         speachesModelsError: null,
         downloadConfirm: { show: false, model: null },
-        // Sync modal
-        showSyncModal: false,
+        // Sync
         syncLoading: false,
         syncHours: '24',
         syncResult: null,
@@ -40,10 +39,20 @@ function transcribeApp() {
         summariesLoading: false,
         // Dark mode
         darkMode: document.documentElement.classList.contains('dark'),
-        // Toast
-        toast: { show: false, message: '', type: 'info' },
+        // Toast stack
+        toasts: [],
+        _toastId: 0,
         // Audio playback
         activeAudio: { id: null, time: 0 },
+        // Expanded segment panels
+        expandedSegments: {},
+        // Active long operations
+        activeOps: [],
+        _opsTimerId: null,
+        // Onboarding status
+        onboarding: { checked: false, nvrOk: null, whisperOk: null, loading: false },
+        // Bulk selection
+        selectedIds: [],
         settings: {
             whisper_model: 'Systran/faster-whisper-large-v3',
             language: 'da',
@@ -60,10 +69,20 @@ function transcribeApp() {
         },
         availableLanguages: [],
 
+        _pollTimer: null,
+
         async init() {
             await this.loadAll();
             await this.loadSettings();
-            setInterval(() => this.refresh(), 30000);
+            this.checkOnboarding();
+            this.schedulePoll();
+        },
+
+        schedulePoll() {
+            if (this._pollTimer) clearTimeout(this._pollTimer);
+            const hasActive = this.stats.processing > 0 || this.transcriptions.some(t => t.status === 'pending' || t.status === 'processing');
+            const interval = hasActive ? 5000 : 30000;
+            this._pollTimer = setTimeout(() => this.refresh(), interval);
         },
 
         async loadAll() {
@@ -75,7 +94,7 @@ function transcribeApp() {
             ]);
         },
 
-        async refresh() { await this.loadAll(); },
+        async refresh() { await this.loadAll(); this.schedulePoll(); },
 
         async loadStats() {
             try { this.stats = await (await fetch('/api/stats')).json(); }
@@ -94,6 +113,7 @@ function transcribeApp() {
 
         async loadTranscriptions() {
             this.loading = true;
+            this.selectedIds = [];
             try {
                 const p = new URLSearchParams({ page: this.pagination.page, per_page: this.pagination.per_page });
                 if (this.filters.search) p.append('search', this.filters.search);
@@ -194,8 +214,38 @@ function transcribeApp() {
         },
 
         showToast(message, type = 'info') {
-            this.toast = { show: true, message, type };
-            setTimeout(() => { this.toast.show = false; }, 3000);
+            const id = ++this._toastId;
+            this.toasts.push({ id, message, type, show: true });
+            if (this.toasts.length > 5) this.toasts.splice(0, this.toasts.length - 5);
+            setTimeout(() => { this.dismissToast(id); }, 3000);
+        },
+
+        dismissToast(id) {
+            const t = this.toasts.find(t => t.id === id);
+            if (t) t.show = false;
+            setTimeout(() => { this.toasts = this.toasts.filter(t => t.id !== id); }, 200);
+        },
+
+        startOp(id, label) {
+            this.activeOps = this.activeOps.filter(o => o.id !== id);
+            this.activeOps.push({ id, label, startedAt: Date.now() });
+            if (!this._opsTimerId) {
+                this._opsTimerId = setInterval(() => { this.activeOps = [...this.activeOps]; }, 1000);
+            }
+        },
+
+        endOp(id) {
+            this.activeOps = this.activeOps.filter(o => o.id !== id);
+            if (this.activeOps.length === 0 && this._opsTimerId) {
+                clearInterval(this._opsTimerId);
+                this._opsTimerId = null;
+            }
+        },
+
+        formatElapsed(startedAt) {
+            const s = Math.floor((Date.now() - startedAt) / 1000);
+            if (s < 60) return s + 's';
+            return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
         },
 
         highlightSearch(text) {
@@ -211,6 +261,7 @@ function transcribeApp() {
             if (filter === 'today') this.filters.date = today;
             else if (filter === 'errors') this.filters.status = 'error';
             else if (filter === 'processing') this.filters.status = 'processing';
+            this.pagination.page = 1;
             this.loadTranscriptions();
         },
 
@@ -221,6 +272,56 @@ function transcribeApp() {
             this.darkMode = !this.darkMode;
             document.documentElement.classList.toggle('dark', this.darkMode);
             localStorage.setItem('theme', this.darkMode ? 'dark' : 'light');
+        },
+
+        toggleSelect(id) {
+            const idx = this.selectedIds.indexOf(id);
+            if (idx === -1) this.selectedIds.push(id);
+            else this.selectedIds.splice(idx, 1);
+        },
+
+        toggleSelectAll() {
+            if (this.selectedIds.length === this.transcriptions.length) {
+                this.selectedIds = [];
+            } else {
+                this.selectedIds = this.transcriptions.map(t => t.id);
+            }
+        },
+
+        clearSelection() { this.selectedIds = []; },
+
+        async bulkDelete() {
+            if (!this.selectedIds.length) return;
+            this.startOp('bulk-delete', `Deleting ${this.selectedIds.length} transcriptions`);
+            try {
+                const r = await fetch('/api/transcriptions/bulk-delete', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ids: [...this.selectedIds] })
+                });
+                if (!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || `HTTP ${r.status}`);
+                const data = await r.json();
+                this.showToast(data.message, 'success');
+                this.selectedIds = [];
+                await this.loadAll();
+            } catch (e) { this.showToast('Bulk delete failed: ' + e.message, 'error'); }
+            finally { this.endOp('bulk-delete'); }
+        },
+
+        async bulkRetry() {
+            if (!this.selectedIds.length) return;
+            this.startOp('bulk-retry', `Retrying ${this.selectedIds.length} transcriptions`);
+            try {
+                const r = await fetch('/api/transcriptions/bulk-retry', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ids: [...this.selectedIds] })
+                });
+                if (!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || `HTTP ${r.status}`);
+                const data = await r.json();
+                this.showToast(data.message, 'success');
+                this.selectedIds = [];
+                await this.loadAll();
+            } catch (e) { this.showToast('Bulk retry failed: ' + e.message, 'error'); }
+            finally { this.endOp('bulk-retry'); }
         },
 
         confirmRetry(item) {
@@ -267,6 +368,7 @@ function transcribeApp() {
 
         async retranscribeAll(includeErrors) {
             this.retranscribing = true; this.retranscribeResult = null;
+            this.startOp('retranscribe', 'Re-transcribing all');
             try {
                 const r = await fetch('/api/transcriptions/retranscribe-all', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -278,7 +380,7 @@ function transcribeApp() {
                 this.showToast(data.message, 'success');
                 await this.loadAll();
             } catch (e) { this.showToast('Failed: ' + e.message, 'error'); }
-            finally { this.retranscribing = false; }
+            finally { this.retranscribing = false; this.endOp('retranscribe'); }
         },
 
         openSummaries() { this.showSummaries = true; this.loadSummaries(); },
@@ -317,6 +419,20 @@ function transcribeApp() {
             } catch (e) { console.error(e); }
         },
 
+        async checkOnboarding() {
+            if (this.stats.total > 0 || this.onboarding.checked) return;
+            this.onboarding.loading = true;
+            try {
+                const [nvrRes, whisperRes] = await Promise.allSettled([
+                    fetch('/api/settings/test-protect', { method: 'POST' }).then(r => r.json()),
+                    fetch('/api/settings/test-whisper', { method: 'POST' }).then(r => r.json()),
+                ]);
+                this.onboarding.nvrOk = nvrRes.status === 'fulfilled' && nvrRes.value.status === 'connected';
+                this.onboarding.whisperOk = whisperRes.status === 'fulfilled' && whisperRes.value.status === 'connected';
+            } catch { /* ignore */ }
+            finally { this.onboarding.loading = false; this.onboarding.checked = true; }
+        },
+
         openSettings() {
             this.showSettings = true;
             if (this.speachesModels.length === 0) this.loadSpeachesModels();
@@ -346,6 +462,7 @@ function transcribeApp() {
 
             const m = this.speachesModels.find(x => x.id === model.id);
             if (m) m.downloading = true;
+            this.startOp('model-dl', `Downloading model ${model.id}`);
             try {
                 const r = await fetch(`/api/settings/speaches-models/${model.id}`, { method: 'POST' });
                 if (r.ok) {
@@ -360,6 +477,8 @@ function transcribeApp() {
             } catch (e) {
                 this.showToast(`Download failed: ${e.message}`, 'error');
                 if (m) m.downloading = false;
+            } finally {
+                this.endOp('model-dl');
             }
         },
 
@@ -395,6 +514,7 @@ function transcribeApp() {
 
         async runSync() {
             this.syncLoading = true; this.syncResult = null;
+            this.startOp('sync', 'Syncing from NVR');
             try {
                 const r = await fetch(`/api/sync?hours=${this.syncHours}`, { method: 'POST' });
                 const data = await r.json();
@@ -404,7 +524,7 @@ function transcribeApp() {
                     setTimeout(() => this.loadAll(), 2000);
                 }
             } catch (e) { this.syncResult = { status: 'error', message: e.message }; }
-            finally { this.syncLoading = false; }
+            finally { this.syncLoading = false; this.endOp('sync'); }
         },
 
         async performReset() {

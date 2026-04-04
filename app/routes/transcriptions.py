@@ -378,6 +378,95 @@ async def retranscribe_all(request: Request):
     return {"reset": count, "message": f"Queued {count} transcriptions for re-processing"}
 
 
+@router.post("/api/transcriptions/bulk-delete")
+async def bulk_delete(request: Request):
+    body = await request.json()
+    ids: list[int] = body.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="No IDs provided")
+
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(
+            f"SELECT id, audio_file FROM transcriptions WHERE id IN ({placeholders})",
+            ids,
+        )
+        rows = cursor.fetchall()
+
+        for row in rows:
+            if row["audio_file"]:
+                audio_path = Path(AUDIO_PATH) / row["audio_file"]
+                try:
+                    audio_path.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("Could not delete audio file %s: %s", audio_path, exc)
+
+        cursor.execute(f"DELETE FROM transcriptions WHERE id IN ({placeholders})", ids)
+        deleted = cursor.rowcount
+        conn.commit()
+        return {"deleted": deleted, "message": f"Deleted {deleted} transcriptions"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error in bulk delete: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@router.post("/api/transcriptions/bulk-retry")
+async def bulk_retry(request: Request):
+    body = await request.json()
+    ids: list[int] = body.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="No IDs provided")
+
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(f"SELECT * FROM transcriptions WHERE id IN ({placeholders})", ids)
+        rows = cursor.fetchall()
+
+        settings = get_settings()
+        language = settings.get("language", "da")
+
+        to_retry = []
+        for row in rows:
+            try:
+                dt = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+                to_retry.append((dict(row), int(dt.timestamp() * 1000)))
+            except Exception as exc:
+                logger.error(
+                    "Failed to parse timestamp for event %s: %s",
+                    row["event_id"],
+                    exc,
+                )
+
+        for row, _ in to_retry:
+            cursor.execute("DELETE FROM transcriptions WHERE id=?", (row["id"],))
+        conn.commit()
+        conn.close()
+
+        queued = sum(
+            queue_transcription(row["event_id"], row["camera_id"], row["camera_name"], ts, language)
+            for row, ts in to_retry
+        )
+        return {"queued": queued, "message": f"Queued {queued} transcriptions for retry"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error in bulk retry: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
 @router.get("/audio/{filename}")
 async def get_audio(filename: str):
     file_path = Path(AUDIO_PATH) / filename
