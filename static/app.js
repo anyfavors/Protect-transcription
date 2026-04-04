@@ -481,7 +481,7 @@ function transcribeApp() {
             this.speachesModelsError = null;
             try {
                 const data = await (await fetch('/api/settings/speaches-models')).json();
-                this.speachesModels = data.models;
+                this.speachesModels = data.models.map(m => ({ ...m, downloading: false }));
             } catch (e) {
                 this.speachesModelsError = 'Could not reach speaches server';
             } finally {
@@ -584,6 +584,15 @@ function transcribeApp() {
                 this.analyticsData = await (await fetch(url)).json();
             } catch (e) { this.showToast('Failed to load analytics: ' + e.message, 'error'); }
             finally { this.analyticsLoading = false; }
+        },
+
+        availableModelsForLang() {
+            const lang = this.settings.language;
+            return this.speachesModels.filter(m =>
+                !m.installed && (
+                    !m.language || m.language.length === 0 || m.language.includes(lang)
+                )
+            );
         },
 
         maxOf(arr, key) {

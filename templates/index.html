@@ -11,6 +11,7 @@
         }
     </script>
     <link rel="stylesheet" href="/static/app.css">
+    <script src="/static/app.js" defer></script>
     <script src="https://unpkg.com/alpinejs@3.14.9/dist/cdn.min.js" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 </head>
@@ -358,8 +359,8 @@
                                                 </template>
                                             </div>
                                             <div class="flex items-center justify-between mt-1.5 pt-1.5 border-t border-gray-200 dark:border-gray-700/50"
-                                                x-show="item.segments.length > 3">
-                                                <span class="text-xs text-gray-400 dark:text-gray-500" x-text="item.segments.length + ' segments'"></span>
+                                                x-show="item.segments && item.segments.length > 3">
+                                                <span class="text-xs text-gray-400 dark:text-gray-500" x-text="(item.segments?.length || 0) + ' segments'"></span>
                                                 <button @click="expandedSegments[item.id] = !expandedSegments[item.id]"
                                                     class="text-xs text-blue-500 dark:text-blue-400 hover:underline">
                                                     <span x-text="expandedSegments[item.id] ? 'Collapse' : 'Expand all'"></span>
@@ -639,33 +640,6 @@
                                         </div>
                                     </template>
 
-                                    <!-- Available to download -->
-                                    <template x-if="!speachesModelsLoading && speachesModels.filter(m => !m.installed).length > 0">
-                                        <div>
-                                            <div class="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 border-t border-gray-200 dark:border-gray-700">
-                                                Available to download
-                                            </div>
-                                            <template x-for="model in speachesModels.filter(m => !m.installed)" :key="model.id">
-                                                <div class="flex items-center gap-3 px-3 py-2.5 border-t border-gray-100 dark:border-gray-700/50">
-                                                    <div class="flex-1 min-w-0">
-                                                        <p class="font-mono truncate text-gray-600 dark:text-gray-300" x-text="model.id"></p>
-                                                        <div class="flex flex-wrap gap-1 mt-0.5">
-                                                            <template x-for="lang in (model.language || []).slice(0, 5)" :key="lang">
-                                                                <span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400" x-text="lang"></span>
-                                                            </template>
-                                                        </div>
-                                                    </div>
-                                                    <button @click="confirmDownloadModel(model)"
-                                                        :disabled="model.downloading"
-                                                        class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg border border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition disabled:opacity-50 whitespace-nowrap">
-                                                        <i class="fas mr-1" :class="model.downloading ? 'fa-spinner animate-spin' : 'fa-download'"></i>
-                                                        <span x-text="model.downloading ? 'Downloading…' : 'Download'"></span>
-                                                    </button>
-                                                </div>
-                                            </template>
-                                        </div>
-                                    </template>
-
                                     <!-- Empty -->
                                     <div x-show="!speachesModelsLoading && !speachesModelsError && speachesModels.length === 0"
                                         class="p-4 text-center text-gray-400 dark:text-gray-500">
@@ -809,6 +783,35 @@
                                     <input type="number" step="0.001" min="0" max="1" x-model="settings.min_audio_energy"
                                         class="w-32 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 outline-none">
                                     <p class="text-xs text-gray-400 mt-0.5">Default 0.005. Set to 0 to disable filtering entirely.</p>
+                                </div>
+                            </div>
+                            <!-- Available models to download (filtered by language) -->
+                            <div x-show="!speachesModelsLoading && availableModelsForLang().length > 0">
+                                <div class="flex items-center justify-between mb-2">
+                                    <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                                        <i class="fas fa-cloud-download-alt mr-1 text-gray-400"></i> Available to download
+                                    </label>
+                                    <span class="text-xs text-gray-400" x-text="availableModelsForLang().length + ' models for ' + settings.language"></span>
+                                </div>
+                                <div class="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden text-sm max-h-80 overflow-y-auto">
+                                    <template x-for="model in availableModelsForLang()" :key="model.id">
+                                        <div class="flex items-center gap-3 px-3 py-2.5 border-t first:border-t-0 border-gray-100 dark:border-gray-700/50">
+                                            <div class="flex-1 min-w-0">
+                                                <p class="font-mono truncate text-gray-600 dark:text-gray-300" x-text="model.id"></p>
+                                                <div class="flex flex-wrap gap-1 mt-0.5">
+                                                    <template x-for="lang in (model.language || []).slice(0, 5)" :key="lang">
+                                                        <span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400" x-text="lang"></span>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                            <button @click="confirmDownloadModel(model)"
+                                                :disabled="model.downloading"
+                                                class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg border border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition disabled:opacity-50 whitespace-nowrap">
+                                                <i class="fas mr-1" :class="model.downloading ? 'fa-spinner animate-spin' : 'fa-download'"></i>
+                                                <span x-text="model.downloading ? 'Downloading…' : 'Download'"></span>
+                                            </button>
+                                        </div>
+                                    </template>
                                 </div>
                             </div>
                         </div>
@@ -1293,6 +1296,5 @@
 
 </div><!-- end x-data -->
 
-<script src="/static/app.js"></script>
 </body>
 </html>
