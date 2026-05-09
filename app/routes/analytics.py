@@ -20,7 +20,7 @@ async def hourly_activity(days: int = Query(30, ge=1, le=365)):
             SELECT CAST(strftime('%H', timestamp) AS INTEGER) AS hour, COUNT(*) AS count
             FROM transcriptions
             WHERE status IN ('completed', 'filtered')
-              AND timestamp >= datetime('now', ?)
+              AND timestamp >= datetime('now', 'localtime', ?)
             GROUP BY hour
             ORDER BY hour
             """,
@@ -46,7 +46,7 @@ async def daily_activity(days: int = Query(30, ge=1, le=365)):
                    SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors,
                    SUM(CASE WHEN status='filtered' THEN 1 ELSE 0 END) AS filtered
             FROM transcriptions
-            WHERE timestamp >= datetime('now', ?)
+            WHERE timestamp >= datetime('now', 'localtime', ?)
             GROUP BY day
             ORDER BY day
             """,

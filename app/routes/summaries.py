@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app import summaries as summary_service
+from app.auth import require_api_token
 
 router = APIRouter()
 
@@ -12,7 +13,7 @@ async def get_summaries(period: str = Query("daily")):
     return summary_service.get_summaries(period)
 
 
-@router.post("/api/summaries/generate")
+@router.post("/api/summaries/generate", dependencies=[Depends(require_api_token)])
 async def generate_summary(request: Request):
     data = await request.json()
     period = data.get("period_type", "daily")

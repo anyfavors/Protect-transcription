@@ -46,8 +46,12 @@ COPY --from=tailwind /build/static/app.css static/app.css
 # Copy application source
 COPY app/ app/
 
-# Create data directories
-RUN mkdir -p /data/audio && chmod 777 /data/audio
+# Create non-root user and data directories owned by it.
+# Using a fixed UID so PVC mounts in k8s can match.
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --no-create-home --shell /usr/sbin/nologin appuser \
+    && mkdir -p /data/audio \
+    && chown -R appuser:appuser /data /app
 
 # Environment defaults
 ENV PROTECT_HOST="argos.local" \
@@ -58,10 +62,12 @@ ENV PROTECT_HOST="argos.local" \
     AUDIO_BUFFER_BEFORE="5" \
     AUDIO_BUFFER_AFTER="10"
 
+USER appuser
+
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8080/livez || exit 1
 
 # app package exposes the FastAPI instance as app:app
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

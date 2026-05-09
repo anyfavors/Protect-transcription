@@ -29,8 +29,21 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(request_id)s] - %(name)s - %(levelname)s - %(message)s",
 )
+
+
+class _DefaultRequestIdFilter(logging.Filter):
+    """Inject a default request_id when no middleware is active (e.g. workers, tests)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "request_id"):
+            record.request_id = "-"
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_DefaultRequestIdFilter())
 
 AVAILABLE_LANGUAGES: list[dict] = [
     {"code": "da", "name": "Danish"},

@@ -2,6 +2,8 @@
 Export endpoints: CSV, JSON, and bulk SRT (ZIP) downloads.
 """
 
+from __future__ import annotations
+
 import contextlib
 import csv
 import io
@@ -9,16 +11,21 @@ import json
 import logging
 import sqlite3
 import zipfile
+from collections.abc import Iterator  # noqa: TC003 — used at runtime as generator return type
 from datetime import datetime
 
 from fastapi import APIRouter, Query
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import Response, StreamingResponse
 
 from app.config import LOCAL_TZ
 from app.database import get_connection
+from app.util import csv_safe, format_srt_time, safe_download_filename
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Hard cap on rows per export — defence against accidental OOM on huge tables.
+_EXPORT_MAX_ROWS = 200_000
 
 
 def _build_export_query(
@@ -28,8 +35,9 @@ def _build_export_query(
     date_to: str | None,
     status: str | None,
     search: str | None,
-) -> list[sqlite3.Row]:
-    """Build and execute the export query with optional filters."""
+    limit: int = _EXPORT_MAX_ROWS,
+) -> Iterator[sqlite3.Row]:
+    """Build and execute the export query with optional filters; yields rows lazily."""
     where = ["1=1"]
     params: list = []
 
@@ -51,17 +59,15 @@ def _build_export_query(
         )
         params.append(f'"{search.replace(chr(34), chr(34) + chr(34))}"')
 
-    sql = f"SELECT * FROM transcriptions WHERE {' AND '.join(where)} ORDER BY timestamp DESC"
-    cursor.execute(sql, params)
-    return cursor.fetchall()
-
-
-def _format_srt_time(seconds: float) -> str:
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int((seconds % 1) * 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+    sql = (
+        f"SELECT * FROM transcriptions WHERE {' AND '.join(where)} ORDER BY timestamp DESC LIMIT ?"
+    )
+    cursor.execute(sql, [*params, limit])
+    while True:
+        batch = cursor.fetchmany(500)
+        if not batch:
+            return
+        yield from batch
 
 
 def _generate_srt(row: sqlite3.Row) -> str:
@@ -87,8 +93,8 @@ def _generate_srt(row: sqlite3.Row) -> str:
             continue
         speaker = seg.get("speaker", "")
         prefix = f"[{speaker}] " if speaker else ""
-        start = _format_srt_time(seg.get("start", 0))
-        end = _format_srt_time(seg.get("end", seg.get("start", 0) + 5))
+        start = format_srt_time(seg.get("start", 0))
+        end = format_srt_time(seg.get("end", seg.get("start", 0) + 5))
         lines.extend([str(i), f"{start} --> {end}", f"{prefix}{text}", ""])
 
     return "\n".join(lines)
@@ -102,52 +108,58 @@ async def export_csv(
     status: str | None = None,
     search: str | None = None,
 ):
-    """Export transcriptions as CSV."""
-    conn = get_connection()
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    """Export transcriptions as CSV (streamed; CSV-injection-safe)."""
+    now = datetime.now(tz=LOCAL_TZ).strftime("%Y%m%d_%H%M%S")
 
-    try:
-        rows = _build_export_query(cursor, camera, date_from, date_to, status, search)
-
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(
-            [
-                "id",
-                "event_id",
-                "camera_name",
-                "timestamp",
-                "status",
-                "language",
-                "confidence",
-                "duration_seconds",
-                "transcription",
-            ]
-        )
-        for row in rows:
+    def stream() -> Iterator[str]:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        try:
+            buf = io.StringIO()
+            writer = csv.writer(buf)
             writer.writerow(
                 [
-                    row["id"],
-                    row["event_id"],
-                    row["camera_name"],
-                    row["timestamp"],
-                    row["status"],
-                    row["language"],
-                    row["confidence"],
-                    row["duration_seconds"],
-                    row["transcription"],
+                    "id",
+                    "event_id",
+                    "camera_name",
+                    "timestamp",
+                    "status",
+                    "language",
+                    "confidence",
+                    "duration_seconds",
+                    "transcription",
                 ]
             )
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate()
 
-        now = datetime.now(tz=LOCAL_TZ).strftime("%Y%m%d_%H%M%S")
-        return PlainTextResponse(
-            content=output.getvalue(),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="transcriptions_{now}.csv"'},
-        )
-    finally:
-        conn.close()
+            for row in _build_export_query(cursor, camera, date_from, date_to, status, search):
+                writer.writerow(
+                    [
+                        row["id"],
+                        csv_safe(row["event_id"]),
+                        csv_safe(row["camera_name"]),
+                        row["timestamp"],
+                        row["status"],
+                        row["language"],
+                        row["confidence"],
+                        row["duration_seconds"],
+                        csv_safe(row["transcription"]),
+                    ]
+                )
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate()
+        finally:
+            conn.close()
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="transcriptions_{now}.csv"'},
+    )
 
 
 @router.get("/api/export/json")
@@ -158,16 +170,14 @@ async def export_json(
     status: str | None = None,
     search: str | None = None,
 ):
-    """Export transcriptions as JSON."""
+    """Export transcriptions as JSON (capped at _EXPORT_MAX_ROWS)."""
     conn = get_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
     try:
-        rows = _build_export_query(cursor, camera, date_from, date_to, status, search)
-
-        items = []
-        for row in rows:
+        items: list[dict] = []
+        for row in _build_export_query(cursor, camera, date_from, date_to, status, search):
             segments = None
             if row["segments"]:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -210,17 +220,16 @@ async def export_srt_zip(
     cursor = conn.cursor()
 
     try:
-        rows = _build_export_query(cursor, camera, date_from, date_to, "completed", search)
-
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for row in rows:
+            for row in _build_export_query(cursor, camera, date_from, date_to, "completed", search):
                 srt = _generate_srt(row)
                 if not srt.strip():
                     continue
-                ts = (row["timestamp"] or "unknown").replace(":", "-").replace(" ", "_")
-                cam = (row["camera_name"] or "unknown").replace(" ", "_")
-                zf.writestr(f"{cam}_{ts}.srt", srt)
+                fname = safe_download_filename(
+                    f"{row['camera_name'] or 'unknown'}_{row['timestamp'] or 'unknown'}.srt"
+                )
+                zf.writestr(fname, srt)
 
         now = datetime.now(tz=LOCAL_TZ).strftime("%Y%m%d_%H%M%S")
         return Response(
@@ -230,3 +239,7 @@ async def export_srt_zip(
         )
     finally:
         conn.close()
+
+
+# Backwards-compat alias for old SRT-route behaviour
+_format_srt_time = format_srt_time

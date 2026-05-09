@@ -2,13 +2,16 @@
 Settings GET/PUT and connectivity test endpoints.
 """
 
+from __future__ import annotations
+
 import logging
 
-import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from app.auth import require_api_token
 from app.config import AVAILABLE_LANGUAGES, WHISPER_URL
 from app.database import get_settings, save_setting
+from app.http_clients import get_whisper_client
 from app.protect import get_protect_client, get_protect_host, invalidate_protect_client
 
 logger = logging.getLogger(__name__)
@@ -30,30 +33,48 @@ _ALLOWED_KEYS = {
     "enable_diarization",
     "min_audio_energy",
     "audio_compression_days",
+    "auto_sync_hours",
+    "auto_sync_interval_minutes",
+    "auto_summary_time",
+    "processing_timeout_minutes",
+    "protect_verify_ssl",
 }
 
-_BOOL_KEYS = {"vad_filter", "condition_on_previous_text", "enable_diarization"}
+_BOOL_KEYS = {
+    "vad_filter",
+    "condition_on_previous_text",
+    "enable_diarization",
+    "protect_verify_ssl",
+}
 
 _INT_BOUNDS = {
     "buffer_before": (1, 60),
     "buffer_after": (1, 600),
     "beam_size": (1, 10),
     "audio_compression_days": (0, 365),
+    "auto_sync_hours": (1, 720),
+    "auto_sync_interval_minutes": (5, 1440),
+    "processing_timeout_minutes": (1, 1440),
 }
+
+# Settings that should never appear in the GET response (defence in depth —
+# they aren't currently stored, but if a deployment ever adds them, redact).
+_REDACTED_KEYS = {"protect_password", "api_token", "webhook_secret"}
 
 
 @router.get("/api/settings")
 async def api_get_settings():
+    settings = {k: v for k, v in get_settings().items() if k not in _REDACTED_KEYS}
     return {
-        "settings": get_settings(),
+        "settings": settings,
         "available_languages": AVAILABLE_LANGUAGES,
     }
 
 
-@router.put("/api/settings")
+@router.put("/api/settings", dependencies=[Depends(require_api_token)])
 async def api_update_settings(request: Request):
     data = await request.json()
-    updated = []
+    updated: list[str] = []
     protect_host_changed = False
 
     for key, value in data.items():
@@ -76,6 +97,20 @@ async def api_update_settings(request: Request):
             value = str(value).strip().rstrip("/").removeprefix("https://").removeprefix("http://")
             protect_host_changed = True
 
+        if key == "protect_verify_ssl":
+            protect_host_changed = True  # force reconnect to apply new SSL setting
+
+        if key == "auto_summary_time":
+            # Validate HH:MM
+            try:
+                h, m = str(value).split(":", 1)
+                if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                    raise ValueError
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400, detail="auto_summary_time must be HH:MM"
+                ) from exc
+
         save_setting(key, str(value))
         updated.append(key)
 
@@ -83,21 +118,22 @@ async def api_update_settings(request: Request):
         invalidate_protect_client()
         logger.info("Protect host changed, client will reconnect on next request")
 
-    return {"status": "updated", "updated_keys": updated, "settings": get_settings()}
+    settings = {k: v for k, v in get_settings().items() if k not in _REDACTED_KEYS}
+    return {"status": "updated", "updated_keys": updated, "settings": settings}
 
 
 @router.post("/api/settings/test-whisper")
 async def test_whisper_connection():
+    client = get_whisper_client()
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{WHISPER_URL}/v1/models")
-            if response.status_code == 200:
-                return {
-                    "status": "connected",
-                    "whisper_url": WHISPER_URL,
-                    "models": response.json(),
-                }
-            return {"status": "error", "message": f"Whisper returned status {response.status_code}"}
+        response = await client.get(f"{WHISPER_URL}/v1/models", timeout=10.0)
+        if response.status_code == 200:
+            return {
+                "status": "connected",
+                "whisper_url": WHISPER_URL,
+                "models": response.json(),
+            }
+        return {"status": "error", "message": f"Whisper returned status {response.status_code}"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
@@ -129,27 +165,30 @@ async def get_speaches_models():
     Returns all ASR models from the speaches registry merged with the list of
     already-installed models so the UI knows which ones need downloading.
     """
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        installed_ids: set[str] = set()
-        try:
-            r = await client.get(f"{WHISPER_URL}/v1/models")
-            if r.status_code == 200:
-                for m in r.json().get("data", r.json() if isinstance(r.json(), list) else []):
-                    installed_ids.add(m.get("id", ""))
-        except Exception as exc:
-            logger.warning("Could not fetch installed models from speaches: %s", exc)
+    client = get_whisper_client()
+    installed_ids: set[str] = set()
+    try:
+        r = await client.get(f"{WHISPER_URL}/v1/models", timeout=15.0)
+        if r.status_code == 200:
+            payload = r.json()
+            data = payload.get("data", payload) if isinstance(payload, dict) else payload
+            for m in data:
+                installed_ids.add(m.get("id", ""))
+    except Exception as exc:
+        logger.warning("Could not fetch installed models from speaches: %s", exc)
 
-        registry: list[dict] = []
-        try:
-            r = await client.get(
-                f"{WHISPER_URL}/v1/registry",
-                params={"task": "automatic-speech-recognition"},
-            )
-            if r.status_code == 200:
-                data = r.json()
-                registry = data.get("data", data) if isinstance(data, dict) else data
-        except Exception as exc:
-            logger.warning("Could not fetch speaches registry: %s", exc)
+    registry: list[dict] = []
+    try:
+        r = await client.get(
+            f"{WHISPER_URL}/v1/registry",
+            params={"task": "automatic-speech-recognition"},
+            timeout=15.0,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            registry = data.get("data", data) if isinstance(data, dict) else data
+    except Exception as exc:
+        logger.warning("Could not fetch speaches registry: %s", exc)
 
     models = [
         {
@@ -165,19 +204,25 @@ async def get_speaches_models():
     return {"models": models, "installed_ids": sorted(installed_ids)}
 
 
-@router.post("/api/settings/speaches-models/{model_id:path}")
+@router.post(
+    "/api/settings/speaches-models/{model_id:path}",
+    dependencies=[Depends(require_api_token)],
+)
 async def install_speaches_model(model_id: str):
     """Trigger speaches to download a model. May take several minutes."""
+    if ".." in model_id or model_id.startswith("/"):
+        raise HTTPException(status_code=400, detail="invalid model id")
+
     logger.info("Requesting speaches to download model: %s", model_id)
+    client = get_whisper_client()
     try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            r = await client.post(f"{WHISPER_URL}/v1/models/{model_id}")
-            if r.status_code in (200, 201):
-                return {"status": "installed", "model_id": model_id}
-            raise HTTPException(
-                status_code=r.status_code,
-                detail=f"speaches returned {r.status_code}: {r.text}",
-            )
+        r = await client.post(f"{WHISPER_URL}/v1/models/{model_id}", timeout=600.0)
+        if r.status_code in (200, 201):
+            return {"status": "installed", "model_id": model_id}
+        raise HTTPException(
+            status_code=r.status_code,
+            detail=f"speaches returned {r.status_code}: {r.text}",
+        )
     except HTTPException:
         raise
     except Exception as exc:

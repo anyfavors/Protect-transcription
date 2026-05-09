@@ -40,6 +40,11 @@ def get_protect_host() -> str:
     return host or PROTECT_HOST
 
 
+def _verify_ssl_setting() -> bool:
+    val = (get_setting("protect_verify_ssl", "false") or "false").lower()
+    return val in ("true", "1", "yes")
+
+
 async def get_protect_client(force_reconnect: bool = False) -> ProtectApiClient:
     """Return (or create) the singleton Protect API client."""
     global _protect_client
@@ -59,7 +64,7 @@ async def get_protect_client(force_reconnect: bool = False) -> ProtectApiClient:
                 port=PROTECT_PORT,
                 username=PROTECT_USERNAME,
                 password=PROTECT_PASSWORD,
-                verify_ssl=False,
+                verify_ssl=_verify_ssl_setting(),
             )
             await _protect_client.update()
             logger.info("Connected to UniFi Protect")
@@ -74,7 +79,7 @@ async def get_protect_client(force_reconnect: bool = False) -> ProtectApiClient:
                     port=PROTECT_PORT,
                     username=PROTECT_USERNAME,
                     password=PROTECT_PASSWORD,
-                    verify_ssl=False,
+                    verify_ssl=_verify_ssl_setting(),
                 )
                 await _protect_client.update()
                 logger.info("Reconnected to UniFi Protect")

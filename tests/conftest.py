@@ -49,16 +49,20 @@ def tmp_db(tmp_path, monkeypatch) -> Generator[str, None, None]:
     monkeypatch.setattr(db_mod, "_connect", _make_connection)
 
     # Patch get_connection in every module that imported it at module load time
+    import app.routes.analytics as _ra
+    import app.routes.export as _re
+    import app.routes.health as _rh
     import app.routes.sync as _rs
     import app.routes.transcriptions as _rt
     import app.summaries as _sm
+    import app.sync_service as _ss
     import app.worker as _wk
 
-    for mod in (_rt, _rs, _sm, _wk):
+    for mod in (_rt, _rs, _sm, _wk, _ss, _ra, _re, _rh):
         if hasattr(mod, "get_connection"):
             monkeypatch.setattr(mod, "get_connection", _make_connection)
 
-    # Also fix DATABASE_PATH used directly in worker.py and summaries.py
+    # Also fix DATABASE_PATH used directly in worker.py
     monkeypatch.setattr(_wk, "DATABASE_PATH", db_file)
 
     from app.database import init_database

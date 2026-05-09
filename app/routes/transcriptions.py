@@ -2,30 +2,29 @@
 Transcription CRUD routes: list, delete, retry, SRT download, bulk operations.
 """
 
+from __future__ import annotations
+
 import contextlib
 import json
 import logging
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 
-from app.config import AUDIO_PATH
-from app.database import get_connection, get_settings
-from app.worker import queue_transcription
+from app.auth import require_api_token
+from app.config import AUDIO_PATH, LOCAL_TZ
+from app.database import audit, get_connection
+from app.util import (
+    format_srt_time,
+    parse_timestamp_to_ms,
+    safe_audio_path,
+    safe_download_filename,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def _format_srt_time(seconds: float) -> str:
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int((seconds % 1) * 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
 @router.get("/api/transcriptions")
@@ -36,99 +35,149 @@ async def get_transcriptions(
     date: str | None = None,
     search: str | None = None,
     status: str | None = None,
+    cursor: str | None = Query(default=None, description="Keyset cursor: 'timestamp,id'"),
 ):
+    """
+    List transcriptions.
+
+    Two pagination modes:
+    * Default OFFSET-based using ?page= and ?per_page= (compatible with older UI).
+    * Keyset using ?cursor=<timestamp>,<id> for stable pagination on big tables.
+      When ?cursor is given, ?page is ignored.
+    """
     conn = get_connection()
     conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
     try:
-        if search:
-            search_term = search.replace('"', '""')
-            where_clauses, params = [], []
-            if camera:
-                where_clauses.append("t.camera_name = ?")
-                params.append(camera)
-            if date:
-                where_clauses.append("DATE(t.timestamp) = ?")
-                params.append(date)
-            if status:
-                where_clauses.append("t.status = ?")
-                params.append(status)
-            extra = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+        rows, total = _query_transcriptions(
+            cur, page, per_page, camera, date, search, status, cursor
+        )
+        transcriptions = [_row_to_dict(r) for r in rows]
 
-            cursor.execute(
-                f"SELECT COUNT(*) FROM transcriptions t "
-                f"INNER JOIN transcriptions_fts fts ON t.id = fts.rowid "
-                f"WHERE transcriptions_fts MATCH ?{extra}",
-                [f'"{search_term}"', *params],
-            )
-            total = cursor.fetchone()[0]
+        next_cursor = None
+        if rows and len(rows) == per_page:
+            last = rows[-1]
+            next_cursor = f"{last['timestamp']},{last['id']}"
 
-            offset = (page - 1) * per_page
-            cursor.execute(
-                f"SELECT t.* FROM transcriptions t "
-                f"INNER JOIN transcriptions_fts fts ON t.id = fts.rowid "
-                f"WHERE transcriptions_fts MATCH ?{extra} "
-                f"ORDER BY t.timestamp DESC LIMIT ? OFFSET ?",
-                [f'"{search_term}"', *params, per_page, offset],
-            )
-        else:
-            where_clauses, params = [], []
-            if camera:
-                where_clauses.append("camera_name = ?")
-                params.append(camera)
-            if date:
-                where_clauses.append("DATE(timestamp) = ?")
-                params.append(date)
-            if status:
-                where_clauses.append("status = ?")
-                params.append(status)
-            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-
-            cursor.execute(f"SELECT COUNT(*) FROM transcriptions WHERE {where_sql}", params)
-            total = cursor.fetchone()[0]
-
-            offset = (page - 1) * per_page
-            cursor.execute(
-                f"SELECT * FROM transcriptions WHERE {where_sql} "
-                f"ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-                [*params, per_page, offset],
-            )
-
-        rows = cursor.fetchall()
-        transcriptions = []
-        for row in rows:
-            segments = None
-            try:
-                raw = row["segments"]
-                if raw:
-                    segments = json.loads(raw)
-            except (KeyError, json.JSONDecodeError):
-                pass
-
-            transcriptions.append(
-                {
-                    "id": row["id"],
-                    "event_id": row["event_id"],
-                    "camera_name": row["camera_name"],
-                    "timestamp": row["timestamp"],
-                    "transcription": row["transcription"],
-                    "segments": segments,
-                    "language": row["language"],
-                    "duration_seconds": row["duration_seconds"],
-                    "status": row["status"],
-                    "audio_file": row["audio_file"],
-                }
-            )
-
-        return {
+        response: dict = {
             "transcriptions": transcriptions,
             "total": total,
             "page": page,
             "per_page": per_page,
-            "pages": (total + per_page - 1) // per_page,
+            "pages": (total + per_page - 1) // per_page if total else 0,
         }
+        if next_cursor:
+            response["next_cursor"] = next_cursor
+        return response
 
+    finally:
+        conn.close()
+
+
+def _query_transcriptions(
+    cur: sqlite3.Cursor,
+    page: int,
+    per_page: int,
+    camera: str | None,
+    date: str | None,
+    search: str | None,
+    status: str | None,
+    cursor: str | None,
+) -> tuple[list[sqlite3.Row], int]:
+    where: list[str] = []
+    params: list = []
+
+    if camera:
+        where.append("t.camera_name = ?")
+        params.append(camera)
+    if date:
+        where.append("DATE(t.timestamp) = ?")
+        params.append(date)
+    if status:
+        where.append("t.status = ?")
+        params.append(status)
+
+    if search:
+        search_term = search.replace('"', '""')
+        where.insert(0, "transcriptions_fts MATCH ?")
+        params.insert(0, f'"{search_term}"')
+        from_clause = "transcriptions t INNER JOIN transcriptions_fts fts ON t.id = fts.rowid"
+    else:
+        from_clause = "transcriptions t"
+
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    cur.execute(f"SELECT COUNT(*) FROM {from_clause}{where_sql}", params)
+    total = cur.fetchone()[0]
+
+    keyset_clause = ""
+    keyset_params: list = []
+    if cursor:
+        try:
+            ts_str, id_str = cursor.rsplit(",", 1)
+            cursor_id = int(id_str)
+            keyset_clause = (
+                " AND (t.timestamp < ? OR (t.timestamp = ? AND t.id < ?))"
+                if where_sql
+                else " WHERE (t.timestamp < ? OR (t.timestamp = ? AND t.id < ?))"
+            )
+            keyset_params = [ts_str, ts_str, cursor_id]
+        except (ValueError, TypeError):
+            pass
+
+    if keyset_clause:
+        sql = (
+            f"SELECT t.* FROM {from_clause}{where_sql}{keyset_clause} "
+            f"ORDER BY t.timestamp DESC, t.id DESC LIMIT ?"
+        )
+        cur.execute(sql, [*params, *keyset_params, per_page])
+    else:
+        offset = (page - 1) * per_page
+        sql = (
+            f"SELECT t.* FROM {from_clause}{where_sql} "
+            f"ORDER BY t.timestamp DESC, t.id DESC LIMIT ? OFFSET ?"
+        )
+        cur.execute(sql, [*params, per_page, offset])
+
+    return cur.fetchall(), total
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    segments = None
+    try:
+        raw = row["segments"]
+        if raw:
+            segments = json.loads(raw)
+    except (KeyError, json.JSONDecodeError):
+        pass
+
+    return {
+        "id": row["id"],
+        "event_id": row["event_id"],
+        "camera_name": row["camera_name"],
+        "timestamp": row["timestamp"],
+        "transcription": row["transcription"],
+        "segments": segments,
+        "language": row["language"],
+        "duration_seconds": row["duration_seconds"],
+        "status": row["status"],
+        "audio_file": row["audio_file"],
+    }
+
+
+@router.get("/api/audit-log", dependencies=[Depends(require_api_token)])
+async def list_audit_log(limit: int = Query(100, ge=1, le=1000)):
+    """Recent destructive actions, newest first."""
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT id, ts, action, details FROM audit_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        return {"entries": [dict(row) for row in cursor.fetchall()]}
     finally:
         conn.close()
 
@@ -163,6 +212,10 @@ async def get_dates():
 
 @router.get("/api/stats")
 async def get_stats():
+    """Status counters. 'today' is computed in LOCAL_TZ."""
+    from datetime import datetime as _dt
+
+    today_local = _dt.now(tz=LOCAL_TZ).strftime("%Y-%m-%d")
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -176,7 +229,10 @@ async def get_stats():
         errors = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE status='filtered'")
         filtered = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE DATE(timestamp)=DATE('now')")
+        cursor.execute(
+            "SELECT COUNT(*) FROM transcriptions WHERE DATE(timestamp) = ?",
+            (today_local,),
+        )
         today = cursor.fetchone()[0]
         return {
             "total": total,
@@ -190,7 +246,7 @@ async def get_stats():
         conn.close()
 
 
-@router.delete("/api/transcriptions/{transcription_id}")
+@router.delete("/api/transcriptions/{transcription_id}", dependencies=[Depends(require_api_token)])
 async def delete_transcription(transcription_id: int):
     conn = get_connection()
     conn.row_factory = sqlite3.Row
@@ -202,14 +258,16 @@ async def delete_transcription(transcription_id: int):
             raise HTTPException(status_code=404, detail="Transcription not found")
 
         if row["audio_file"]:
-            audio_path = Path(AUDIO_PATH) / row["audio_file"]
-            try:
-                audio_path.unlink(missing_ok=True)
-            except Exception as exc:
-                logger.warning("Could not delete audio file %s: %s", audio_path, exc)
+            safe = safe_audio_path(AUDIO_PATH, row["audio_file"])
+            if safe is not None:
+                try:
+                    safe.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("Could not delete audio file %s: %s", safe, exc)
 
         cursor.execute("DELETE FROM transcriptions WHERE id=?", (transcription_id,))
         conn.commit()
+        audit("delete_transcription", {"id": transcription_id})
         return {"status": "deleted", "id": transcription_id}
 
     except HTTPException:
@@ -252,14 +310,15 @@ async def download_srt(transcription_id: int):
             if text:
                 srt_lines += [
                     str(i),
-                    f"{_format_srt_time(seg.get('start', 0))} --> {_format_srt_time(seg.get('end', seg.get('start', 0) + 5))}",
+                    f"{format_srt_time(seg.get('start', 0))} --> "
+                    f"{format_srt_time(seg.get('end', seg.get('start', 0) + 5))}",
                     text,
                     "",
                 ]
 
-        filename = f"{row['camera_name'] or 'unknown'}_{row['timestamp'] or 'unknown'}.srt".replace(
-            " ", "_"
-        ).replace(":", "-")
+        filename = safe_download_filename(
+            f"{row['camera_name'] or 'unknown'}_{row['timestamp'] or 'unknown'}.srt"
+        )
         return PlainTextResponse(
             content="\n".join(srt_lines),
             media_type="text/plain",
@@ -269,124 +328,118 @@ async def download_srt(transcription_id: int):
         conn.close()
 
 
-@router.post("/api/transcriptions/{transcription_id}/retry")
+def _retry_one_in_txn(cur: sqlite3.Cursor, row: sqlite3.Row) -> tuple[str, str, str, int]:
+    """Reset row to pending in-place. Returns (event_id, camera_id, camera_name, timestamp_ms)."""
+    timestamp_ms = parse_timestamp_to_ms(str(row["timestamp"]))
+    cur.execute(
+        """
+        UPDATE transcriptions
+        SET status='pending',
+            transcription=NULL, segments=NULL, confidence=NULL, duration_seconds=NULL
+        WHERE id=?
+        """,
+        (row["id"],),
+    )
+    return row["event_id"], row["camera_id"], row["camera_name"], timestamp_ms
+
+
+@router.post(
+    "/api/transcriptions/{transcription_id}/retry",
+    dependencies=[Depends(require_api_token)],
+)
 async def retry_transcription(transcription_id: int):
+    """Reset a single row to pending. Done in a single transaction (no data loss)."""
     conn = get_connection()
     conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
     try:
-        cursor.execute("SELECT * FROM transcriptions WHERE id=?", (transcription_id,))
-        row = cursor.fetchone()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM transcriptions WHERE id=?", (transcription_id,))
+        row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Transcription not found")
-
         try:
-            dt = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
-            timestamp_ms = int(dt.timestamp() * 1000)
-        except Exception as exc:
+            event_id, _, _, _ = _retry_one_in_txn(cur, row)
+        except ValueError as exc:
             raise HTTPException(
                 status_code=400, detail=f"Invalid timestamp: {row['timestamp']}"
             ) from exc
-
-        event_id = row["event_id"]
-        camera_id = row["camera_id"]
-        camera_name = row["camera_name"]
-
-        cursor.execute("DELETE FROM transcriptions WHERE id=?", (transcription_id,))
         conn.commit()
-        conn.close()
-
-        settings = get_settings()
-        language = settings.get("language", "da")
-        queue_transcription(event_id, camera_id, camera_name, timestamp_ms, language)
-
         return {"status": "queued", "id": transcription_id, "event_id": event_id}
-
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Error retrying transcription %d: %s", transcription_id, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        with contextlib.suppress(Exception):
-            conn.close()
+        conn.close()
 
 
-@router.post("/api/transcriptions/retry-errors")
+@router.post("/api/transcriptions/retry-errors", dependencies=[Depends(require_api_token)])
 async def retry_all_errors():
     conn = get_connection()
     conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
     try:
-        cursor.execute("SELECT * FROM transcriptions WHERE status='error'")
-        rows = cursor.fetchall()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM transcriptions WHERE status='error'")
+        rows = cur.fetchall()
         if not rows:
             return {"queued": 0, "message": "No error transcriptions found"}
 
-        settings = get_settings()
-        language = settings.get("language", "da")
-
-        to_retry = []
+        queued = 0
         for row in rows:
             try:
-                dt = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
-                to_retry.append((dict(row), int(dt.timestamp() * 1000)))
-            except Exception as exc:
+                _retry_one_in_txn(cur, row)
+                queued += 1
+            except ValueError as exc:
                 logger.error("Failed to parse timestamp for event %s: %s", row["event_id"], exc)
-
-        if not to_retry:
-            return {"queued": 0, "message": "All error records had unparseable timestamps"}
-
-        for row, _ in to_retry:
-            cursor.execute("DELETE FROM transcriptions WHERE id=?", (row["id"],))
         conn.commit()
-        conn.close()
-
-        queued = sum(
-            queue_transcription(row["event_id"], row["camera_id"], row["camera_name"], ts, language)
-            for row, ts in to_retry
-        )
         return {"queued": queued, "message": f"Queued {queued} transcriptions for retry"}
 
     except Exception as exc:
         logger.exception("Error retrying all errors: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        with contextlib.suppress(Exception):
-            conn.close()
+        conn.close()
 
 
-@router.post("/api/transcriptions/retranscribe-all")
+@router.post("/api/transcriptions/retranscribe-all", dependencies=[Depends(require_api_token)])
 async def retranscribe_all(request: Request):
     request_body = await request.json()
     include_errors: bool = request_body.get("include_errors", True)
-    statuses = ("'completed'", "'error'") if include_errors else ("'completed'",)
-    status_clause = f"status IN ({', '.join(statuses)})"
+
+    statuses: tuple[str, ...] = ("completed", "error") if include_errors else ("completed",)
+    placeholders = ",".join("?" for _ in statuses)
 
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute(f"""
+        cursor.execute(
+            f"""
             UPDATE transcriptions
             SET status='pending',
                 transcription=NULL, segments=NULL, language=NULL,
                 confidence=NULL, duration_seconds=NULL
-            WHERE {status_clause}
-        """)
+            WHERE status IN ({placeholders})
+            """,
+            statuses,
+        )
         count = cursor.rowcount
         conn.commit()
     finally:
         conn.close()
 
+    audit("retranscribe_all", {"include_errors": include_errors, "count": count})
     return {"reset": count, "message": f"Queued {count} transcriptions for re-processing"}
 
 
-@router.post("/api/transcriptions/bulk-delete")
+@router.post("/api/transcriptions/bulk-delete", dependencies=[Depends(require_api_token)])
 async def bulk_delete(request: Request):
     body = await request.json()
     ids: list[int] = body.get("ids", [])
     if not ids:
         raise HTTPException(status_code=400, detail="No IDs provided")
+    if len(ids) > 1000:
+        raise HTTPException(status_code=400, detail="Too many IDs (max 1000)")
 
     conn = get_connection()
     conn.row_factory = sqlite3.Row
@@ -401,15 +454,17 @@ async def bulk_delete(request: Request):
 
         for row in rows:
             if row["audio_file"]:
-                audio_path = Path(AUDIO_PATH) / row["audio_file"]
-                try:
-                    audio_path.unlink(missing_ok=True)
-                except Exception as exc:
-                    logger.warning("Could not delete audio file %s: %s", audio_path, exc)
+                safe = safe_audio_path(AUDIO_PATH, row["audio_file"])
+                if safe is not None:
+                    try:
+                        safe.unlink(missing_ok=True)
+                    except Exception as exc:
+                        logger.warning("Could not delete audio file %s: %s", safe, exc)
 
         cursor.execute(f"DELETE FROM transcriptions WHERE id IN ({placeholders})", ids)
         deleted = cursor.rowcount
         conn.commit()
+        audit("bulk_delete", {"count": deleted, "ids": ids[:50]})
         return {"deleted": deleted, "message": f"Deleted {deleted} transcriptions"}
     except HTTPException:
         raise
@@ -420,45 +475,31 @@ async def bulk_delete(request: Request):
         conn.close()
 
 
-@router.post("/api/transcriptions/bulk-retry")
+@router.post("/api/transcriptions/bulk-retry", dependencies=[Depends(require_api_token)])
 async def bulk_retry(request: Request):
     body = await request.json()
     ids: list[int] = body.get("ids", [])
     if not ids:
         raise HTTPException(status_code=400, detail="No IDs provided")
+    if len(ids) > 1000:
+        raise HTTPException(status_code=400, detail="Too many IDs (max 1000)")
 
     conn = get_connection()
     conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
     try:
+        cur = conn.cursor()
         placeholders = ",".join("?" for _ in ids)
-        cursor.execute(f"SELECT * FROM transcriptions WHERE id IN ({placeholders})", ids)
-        rows = cursor.fetchall()
+        cur.execute(f"SELECT * FROM transcriptions WHERE id IN ({placeholders})", ids)
+        rows = cur.fetchall()
 
-        settings = get_settings()
-        language = settings.get("language", "da")
-
-        to_retry = []
+        queued = 0
         for row in rows:
             try:
-                dt = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
-                to_retry.append((dict(row), int(dt.timestamp() * 1000)))
-            except Exception as exc:
-                logger.error(
-                    "Failed to parse timestamp for event %s: %s",
-                    row["event_id"],
-                    exc,
-                )
-
-        for row, _ in to_retry:
-            cursor.execute("DELETE FROM transcriptions WHERE id=?", (row["id"],))
+                _retry_one_in_txn(cur, row)
+                queued += 1
+            except ValueError as exc:
+                logger.error("Failed to parse timestamp for event %s: %s", row["event_id"], exc)
         conn.commit()
-        conn.close()
-
-        queued = sum(
-            queue_transcription(row["event_id"], row["camera_id"], row["camera_name"], ts, language)
-            for row, ts in to_retry
-        )
         return {"queued": queued, "message": f"Queued {queued} transcriptions for retry"}
     except HTTPException:
         raise
@@ -466,46 +507,71 @@ async def bulk_retry(request: Request):
         logger.exception("Error in bulk retry: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        with contextlib.suppress(Exception):
-            conn.close()
+        conn.close()
 
 
 _AUDIO_MIME = {".wav": "audio/wav", ".ogg": "audio/ogg", ".opus": "audio/opus"}
 
 
-@router.get("/audio/{filename}")
+@router.get("/audio/{filename}", dependencies=[Depends(require_api_token)])
 async def get_audio(filename: str):
-    file_path = Path(AUDIO_PATH) / filename
-    if not file_path.exists():
+    safe = safe_audio_path(AUDIO_PATH, filename)
+    if safe is None:
+        raise HTTPException(status_code=400, detail="invalid filename")
+    if not safe.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
-    mime = _AUDIO_MIME.get(file_path.suffix, "application/octet-stream")
-    return FileResponse(file_path, media_type=mime, filename=filename)
+    mime = _AUDIO_MIME.get(safe.suffix, "application/octet-stream")
+    return FileResponse(safe, media_type=mime, filename=safe.name)
 
 
-@router.post("/api/database/reset")
-async def reset_database():
+@router.post("/api/database/reset", dependencies=[Depends(require_api_token)])
+async def reset_database(request: Request):
+    """
+    Drop all transcriptions, summaries, and audio files.
+    Requires a confirmation body to prevent accidental fires.
+    """
+    body: dict = {}
+    with contextlib.suppress(Exception):
+        body = await request.json()
+    if body.get("confirm") != "yes":
+        raise HTTPException(
+            status_code=400,
+            detail='Provide {"confirm": "yes"} in body to confirm destructive reset',
+        )
+
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT COUNT(*) FROM transcriptions")
         transcription_count = cursor.fetchone()[0]
         cursor.execute("DELETE FROM transcriptions")
+        cursor.execute("DELETE FROM summaries")
         conn.commit()
         cursor.execute("VACUUM")
-        conn.commit()
     finally:
         conn.close()
 
     audio_files_deleted = 0
     audio_dir = Path(AUDIO_PATH)
     if audio_dir.exists():
-        for f in audio_dir.glob("*.wav"):
+        for f in audio_dir.iterdir():
+            if not f.is_file():
+                continue
+            if f.suffix not in _AUDIO_MIME:
+                continue
             try:
                 f.unlink()
                 audio_files_deleted += 1
             except Exception as exc:
                 logger.warning("Failed to delete audio file %s: %s", f, exc)
 
+    audit(
+        "database_reset",
+        {
+            "transcriptions_deleted": transcription_count,
+            "audio_files_deleted": audio_files_deleted,
+        },
+    )
     return {
         "status": "success",
         "message": "Database reset successfully",
