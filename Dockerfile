@@ -48,10 +48,17 @@ COPY app/ app/
 
 # Create non-root user and data directories owned by it.
 # Using a fixed UID so PVC mounts in k8s can match.
+# Home dir is created so libraries that touch ~/.cache (httpx, aiohttp, etc) don't EPERM.
 RUN groupadd --system --gid 10001 appuser \
-    && useradd --system --uid 10001 --gid appuser --no-create-home --shell /usr/sbin/nologin appuser \
+    && useradd --system --uid 10001 --gid appuser \
+        --create-home --home-dir /home/appuser \
+        --shell /usr/sbin/nologin appuser \
     && mkdir -p /data/audio \
-    && chown -R appuser:appuser /data /app
+    && chown -R appuser:appuser /data /app /home/appuser
+
+ENV HOME=/home/appuser \
+    XDG_CACHE_HOME=/home/appuser/.cache \
+    XDG_CONFIG_HOME=/home/appuser/.config
 
 # Environment defaults
 ENV PROTECT_HOST="argos.local" \
